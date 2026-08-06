@@ -64,14 +64,30 @@ GROUP BY value ORDER BY n DESC LIMIT 25;
 SELECT substr(added_at, 1, 7) AS month, COUNT(*) FROM liked_tracks GROUP BY month;
 ```
 
+## Web UI
+
+`src/server.ts` + `public/index.html`: a read-only browser over the DB —
+overview stats (genres, liked-per-month), artist grid with search, liked
+songs, saved albums, playlists, top artists/tracks per time range, recent
+plays. Zero deps, same as the exporter. Locally: `node src/server.ts` →
+<http://localhost:8080>. On the homelab: **<https://music.home.arpa>**
+(Caddy → `spotify-taste-db-web:8080` over `homelab-net`).
+
 ## Deployment (pi-server)
 
-Runs on `pi-server` (192.168.2.23) as the `spotify-taste-db` container — see
-`docker-compose.yml` (persistent `node:24-alpine` with an internal 6h sync
-loop, so it's visible in Portainer/Beszel like the other services; system
-Node on the Pi is v18). Deployed at `pi:~/spotify-taste-db`; logs via
-`docker logs spotify-taste-db`; the DB lives at `data/spotify.db` on the Pi.
-Grab a copy for local querying with:
+Runs on `pi-server` (192.168.2.23) as two containers from one compose file —
+`spotify-taste-db` (exporter, internal 6h sync loop) and `spotify-taste-db-web`
+(UI) — both plain `node:24-alpine` with this repo bind-mounted (system Node on
+the Pi is v18). The deployed copy at `pi:~/spotify-taste-db` is a checkout of
+<https://github.com/joe-lloyd/music-dump>; update with:
+
+```sh
+ssh pi 'cd spotify-taste-db && git pull && docker compose up -d --force-recreate'
+```
+
+Logs via `docker logs spotify-taste-db` / `docker logs spotify-taste-db-web`;
+the DB lives at `data/spotify.db` on the Pi. Grab a copy for local querying
+with:
 
 ```sh
 scp pi:spotify-taste-db/data/spotify.db /tmp/spotify.db
