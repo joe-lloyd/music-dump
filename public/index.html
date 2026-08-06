@@ -239,6 +239,17 @@ const trackRow = (t, endText, rank) => {
   </div>`;
 };
 
+const eventRow = (e) => `
+  <div class="row">
+    <div class="end" style="text-align:left;min-width:6.5em">${(e.datetime ?? '').slice(0, 10)}</div>
+    ${e.artist_id ? `<a href="#artist/${e.artist_id}">` : ''}${pic('artists', e.artist_id, e.image_url, e.artist_name)}${e.artist_id ? '</a>' : ''}
+    <div class="mid">
+      <div>${e.artist_id ? `<a href="#artist/${e.artist_id}"><b>${esc(e.artist_name ?? '')}</b></a>` : esc(e.artist_name ?? '')}</div>
+      <div class="sub">${esc(e.venue ?? '')}${e.city ? ' · ' + esc(e.city) : ''}${e.country ? ' (' + esc(e.country) + ')' : ''}</div>
+    </div>
+    ${e.url ? `<a class="spbtn" style="margin:0;flex:none" href="${esc(e.url)}" target="_blank" rel="noopener">Tickets ↗</a>` : ''}
+  </div>`;
+
 const albumCell = (a) => `
   <div class="cell">
     <a href="#album/${a.id}">${pic('albums', a.id, a.image_url, a.name)}
@@ -307,20 +318,34 @@ const views = {
   },
 
   async top() {
-    return `<div class="tools"><div class="seg" id="rseg">
-        <button data-r="short_term">4 weeks</button>
-        <button data-r="medium_term" class="on">6 months</button>
-        <button data-r="long_term">years</button></div></div>
-      <div class="cards">
-        <div class="card"><h2>Top artists</h2><div class="rows" id="ta"></div></div>
-        <div class="card"><h2>Top tracks</h2><div class="rows" id="tt"></div></div>
-      </div>`;
+    return `<div class="tools">
+        <div class="seg" id="mode">
+          <button data-m="plays" class="on">By plays</button>
+          <button data-m="rank">Spotify ranking</button>
+        </div>
+        <div class="seg" id="rseg" style="display:none">
+          <button data-r="short_term">4 weeks</button>
+          <button data-r="medium_term" class="on">6 months</button>
+          <button data-r="long_term">years</button></div>
+        <div class="seg" id="pseg"></div>
+      </div>
+      <div id="topOut"><div class="empty">loading…</div></div>`;
   },
 
   async plays() {
     const all = await api('/api/plays');
     if (!all.length) return '<div class="empty">no plays captured yet</div>';
     return `<div class="rows">${all.map((p) => trackRow(p, ago(p.played_at))).join('')}</div>`;
+  },
+
+  async shows() {
+    const d = await api('/api/events');
+    if (!d.near.length && !d.elsewhere.length) {
+      return '<div class="empty">no shows known yet — needs a (free) Ticketmaster API key, see the README</div>';
+    }
+    return `<h2>Near you (${d.countries.join(', ')})</h2>
+      ${d.near.length ? `<div class="rows">${d.near.map(eventRow).join('')}</div>` : '<div class="empty">nothing announced nearby</div>'}
+      ${d.elsewhere.length ? `<h2>Elsewhere (${d.elsewhere.length})</h2><div class="rows">${d.elsewhere.map(eventRow).join('')}</div>` : ''}`;
   },
 
   async artist(id) {
@@ -349,6 +374,7 @@ const views = {
           ${spbtn('artist', a.id)}
         </div>
       </div>
+      ${d.events?.length ? `<h2>Upcoming shows</h2><div class="rows">${d.events.map((e) => eventRow({ ...e, artist_name: a.name, image_url: a.image_url })).join('')}</div>` : ''}
       ${a.discog_synced_at ? '' : '<div class="note">full discography not crawled yet — showing what the library knows so far</div>'}
       ${discog || '<div class="empty">no albums known yet</div>'}
       ${d.liked.length ? `<h2>Liked tracks</h2><div class="rows">${d.liked.map((t) => trackRow(t, day(t.added_at))).join('')}</div>` : ''}`;
@@ -475,32 +501,98 @@ const after = {
     const first = seg.querySelector('button'); if (first) load(first.dataset.id);
   },
   top(el) {
-    const seg = $('#rseg', el);
-    const load = (range) => {
-      api(`/api/top-artists?range=${range}`).then((rows) => {
-        $('#ta', el).innerHTML = rows.map((a) => `
+    const mode = $('#mode', el), rseg = $('#rseg', el), pseg = $('#pseg', el), out = $('#topOut', el);
+
+    const loadRank = async (range) => {
+      const [artists, tracks] = await Promise.all([
+        api(`/api/top-artists?range=${range}`), api(`/api/top-tracks?range=${range}`)]);
+      out.innerHTML = `<div class="cards">
+        <div class="card"><h2>Top artists</h2><div class="rows">${artists.map((a) => `
           <div class="row"><span class="rank">${a.rank}</span>
             <a href="#artist/${a.id}">${pic('artists', a.id, a.image_url, a.name)}</a>
             <div class="mid"><div><a href="#artist/${a.id}">${esc(a.name)}</a></div>
             <div class="sub">${genres(a.genres, 2).join(', ')}</div></div>
-            ${spotify('artist', a.id)}</div>`).join('')
-          || '<div class="empty">not synced yet</div>';
-      });
-      api(`/api/top-tracks?range=${range}`).then((rows) => {
-        $('#tt', el).innerHTML = rows.map((t) => trackRow(t, '', t.rank)).join('')
-          || '<div class="empty">not synced yet</div>';
-      });
+            ${spotify('artist', a.id)}</div>`).join('') || '<div class="empty">not synced yet</div>'}</div></div>
+        <div class="card"><h2>Top tracks</h2><div class="rows">${tracks.map((t) => trackRow(t, '', t.rank)).join('') || '<div class="empty">not synced yet</div>'}</div></div>
+      </div>`;
     };
-    seg.addEventListener('click', (e) => {
-      const b = e.target.closest('button'); if (!b) return;
-      seg.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
-      load(b.dataset.r);
+
+    // Wrapped-for-any-range: play counts from lifetime history + API capture.
+    const loadPlays = async (from, to) => {
+      out.innerHTML = '<div class="empty">counting…</div>';
+      const d = await (await fetch(`/api/wrapped?from=${from}&to=${to}`)).json();
+      const t = d.totals ?? {};
+      if (!t.plays) {
+        out.innerHTML = '<div class="empty">no plays in this range — the API capture builds from now on, and the extended-history import fills the past</div>';
+        return;
+      }
+      const tiles = [['plays', Number(t.plays).toLocaleString()], ['hours', Math.round((t.ms ?? 0) / 3.6e6).toLocaleString()],
+                     ['different tracks', Number(t.tracks).toLocaleString()], ['different artists', Number(t.artists).toLocaleString()]]
+        .map(([k, v]) => `<div class="tile"><b>${v}</b><span>${k}</span></div>`).join('');
+      const artistRow = (a, i) => `
+        <div class="row"><span class="rank">${i + 1}</span>
+          ${a.artist_id ? `<a href="#artist/${a.artist_id}">` : ''}${pic('artists', a.artist_id, a.image_url, a.artist_name)}${a.artist_id ? '</a>' : ''}
+          <div class="mid"><div>${a.artist_id ? `<a href="#artist/${a.artist_id}">${esc(a.artist_name)}</a>` : esc(a.artist_name)}</div>
+          <div class="sub">${Math.round(a.ms / 3.6e6)}h</div></div>
+          <div class="end">${a.plays}×</div></div>`;
+      const trackRow2 = (x, i) => `
+        <div class="row"><span class="rank">${i + 1}</span>
+          <div class="mid"><div>${esc(x.track_name)}</div><div class="sub">${esc(x.artist_name ?? '')}</div></div>
+          <div class="end">${x.plays}×</div>${x.id ? spotify('track', x.id) : ''}</div>`;
+      const albumRow = (x, i) => `
+        <div class="row"><span class="rank">${i + 1}</span>
+          ${x.album_id ? `<a href="#album/${x.album_id}">` : ''}${pic('albums', x.album_id, x.image_url, x.album_name)}${x.album_id ? '</a>' : ''}
+          <div class="mid"><div>${x.album_id ? `<a href="#album/${x.album_id}">${esc(x.album_name)}</a>` : esc(x.album_name)}</div>
+          <div class="sub">${esc(x.artist_name ?? '')}</div></div>
+          <div class="end">${x.plays}×</div></div>`;
+      out.innerHTML = `<div class="tiles">${tiles}</div>
+        <div class="card" style="margin-bottom:1rem"><h2>Plays per month</h2>${monthChart(d.perMonth, 'plays')}</div>
+        <div class="cards">
+          <div class="card"><h2>Top artists</h2><div class="rows">${d.topArtists.map(artistRow).join('')}</div></div>
+          <div class="card"><h2>Top tracks</h2><div class="rows">${d.topTracks.map(trackRow2).join('')}</div></div>
+          <div class="card"><h2>Top albums</h2><div class="rows">${d.topAlbums.map(albumRow).join('')}</div></div>
+        </div>`;
+    };
+
+    // Range chips: presets + one per year of data.
+    api('/api/wrapped?from=9999&to=9999').then((d) => {
+      const now = new Date();
+      const iso = (dt) => dt.toISOString().slice(0, 10);
+      const presets = [
+        ['All time', '0000', '9999'],
+        ['12 months', iso(new Date(now - 365 * 864e5)), '9999'],
+        ['3 months', iso(new Date(now - 91 * 864e5)), '9999'],
+        ['4 weeks', iso(new Date(now - 28 * 864e5)), '9999'],
+        ...(d.years ?? []).filter((y) => y >= '2000').reverse().map((y) => [y, y, y + '~']),
+      ];
+      pseg.innerHTML = presets.map(([label, f, t], i) =>
+        `<button data-f="${f}" data-t="${t}" class="${i === 0 ? 'on' : ''}">${label}</button>`).join('');
+      pseg.addEventListener('click', (e) => {
+        const b = e.target.closest('button'); if (!b) return;
+        pseg.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
+        loadPlays(b.dataset.f, b.dataset.t);
+      });
     });
-    load('medium_term');
+
+    mode.addEventListener('click', (e) => {
+      const b = e.target.closest('button'); if (!b) return;
+      mode.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
+      const plays = b.dataset.m === 'plays';
+      rseg.style.display = plays ? 'none' : '';
+      pseg.style.display = plays ? '' : 'none';
+      if (plays) loadPlays('0000', '9999');
+      else loadRank(rseg.querySelector('.on').dataset.r);
+    });
+    rseg.addEventListener('click', (e) => {
+      const b = e.target.closest('button'); if (!b) return;
+      rseg.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
+      loadRank(b.dataset.r);
+    });
+    loadPlays('0000', '9999');
   },
 };
 
-const TABS = { overview: 'Overview', artists: 'Artists', liked: 'Songs', albums: 'Albums', playlists: 'Playlists', top: 'Top', plays: 'Plays' };
+const TABS = { overview: 'Overview', artists: 'Artists', liked: 'Songs', albums: 'Albums', playlists: 'Playlists', top: 'Top', shows: 'Shows', plays: 'Plays' };
 const nav = $('#nav');
 nav.innerHTML = Object.entries(TABS).map(([k, v]) => `<button data-t="${k}">${v}</button>`).join('');
 nav.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) location.hash = b.dataset.t; });

@@ -115,6 +115,16 @@ so a second machine invalidates the first's `tokens.json`. The Pi is the
 runner; re-authorize (delete `tokens.json`, run once interactively) if the
 token ever breaks.
 
+## Concerts (Shows tab + ntfy alerts)
+
+Needs a free Ticketmaster Discovery API key: create one at
+<https://developer.ticketmaster.com> (instant, 5k requests/day) and add
+`TICKETMASTER_API_KEY=<key>` to the `.env` on the Pi. The daily run then
+checks every followed artist's upcoming events, fills the **Shows** tab
+(split by `EVENT_COUNTRIES`, default `NL,BE,DE`), lists them on artist pages,
+and pings ntfy (with a tap-through ticket link) whenever a new nearby show
+appears. Without the key the stage just skips.
+
 ## Importing your lifetime listening history
 
 Request "Extended streaming history" at <https://www.spotify.com/account/privacy/>

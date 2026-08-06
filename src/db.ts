@@ -136,6 +136,22 @@ CREATE TABLE IF NOT EXISTS history_plays (
   PRIMARY KEY (ts, track_name, ms_played)
 );
 
+-- Upcoming concerts for followed artists, from the Ticketmaster Discovery
+-- API. Never deleted: last_seen_at goes stale when an event vanishes
+-- (cancelled or past), first_seen_at drives new-show notifications.
+CREATE TABLE IF NOT EXISTS events (
+  id TEXT PRIMARY KEY,
+  artist_id TEXT REFERENCES artists(id),
+  name TEXT,
+  datetime TEXT,
+  venue TEXT,
+  city TEXT,
+  country TEXT,               -- ISO code, e.g. NL
+  url TEXT,                   -- ticket page
+  first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sync_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   started_at TEXT NOT NULL,
@@ -219,6 +235,10 @@ export class TasteDb {
       `ALTER TABLE liked_tracks ADD COLUMN removed_at TEXT`,
       `ALTER TABLE playlists ADD COLUMN removed_at TEXT`,
       `ALTER TABLE playlist_tracks ADD COLUMN removed_at TEXT`,
+      // Concert sync markers: when events were last checked, and the artist's
+      // Ticketmaster attraction id ('' = looked up, no match).
+      `ALTER TABLE artists ADD COLUMN events_synced_at TEXT`,
+      `ALTER TABLE artists ADD COLUMN tm_attraction_id TEXT`,
     ]) {
       try {
         this.db.exec(ddl);

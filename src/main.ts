@@ -416,6 +416,116 @@ async function archiveImages(db: TasteDb): Promise<number> {
   return downloaded;
 }
 
+// Upcoming concerts via the Ticketmaster Discovery API (free key from
+// developer.ticketmaster.com, set TICKETMASTER_API_KEY in .env). Entirely
+// separate from the Spotify quota. Per followed artist: resolve their
+// attraction id once (cached on the artist row), then refresh their events
+// daily. New events in EVENT_COUNTRIES get a ntfy ping with the ticket link.
+const TM_KEY = () => process.env.TICKETMASTER_API_KEY;
+const NEAR = () => (process.env.EVENT_COUNTRIES ?? 'NL').split(',').map((c) => c.trim().toUpperCase());
+
+async function tmGet(pathName: string, params: Record<string, string>): Promise<any> {
+  const url = new URL(`https://app.ticketmaster.com/discovery/v2/${pathName}`);
+  for (const [k, v] of Object.entries({ ...params, apikey: TM_KEY()! })) url.searchParams.set(k, v);
+  for (let attempt = 1; ; attempt++) {
+    const res = await fetch(url);
+    if (res.status === 429 && attempt <= 3) {
+      await sleep(1500 * attempt);
+      continue;
+    }
+    if (!res.ok) throw new ApiError(`ticketmaster ${pathName} failed (${res.status})`, res.status);
+    return res.json();
+  }
+}
+
+async function syncEvents(db: TasteDb): Promise<number> {
+  if (!TM_KEY()) {
+    console.log('Concerts: TICKETMASTER_API_KEY not set — skipping (see README)');
+    return 0;
+  }
+  const artists = db.db.prepare(`
+    SELECT id, name, tm_attraction_id FROM artists
+    WHERE is_followed = 1 AND (events_synced_at IS NULL OR events_synced_at < datetime('now', '-1 day'))
+    ORDER BY followers DESC`).all() as { id: string; name: string; tm_attraction_id: string | null }[];
+  console.log(`Concerts: checking ${artists.length} followed artists...`);
+  const exists = db.db.prepare('SELECT 1 FROM events WHERE id = ?');
+  const newNear: { text: string; url: string }[] = [];
+  let found = 0;
+  for (const artist of artists) {
+    try {
+      let attraction = artist.tm_attraction_id;
+      if (attraction === null) {
+        const body = await tmGet('attractions.json', { keyword: artist.name, classificationName: 'music', size: '5' });
+        const hits = (body._embedded?.attractions ?? []) as { id: string; name: string }[];
+        attraction = hits.find((h) => h.name.toLowerCase() === artist.name.toLowerCase())?.id ?? '';
+        db.run('UPDATE artists SET tm_attraction_id = ? WHERE id = ?', attraction, artist.id);
+        await sleep(250);
+      }
+      if (attraction) {
+        const body = await tmGet('events.json', { attractionId: attraction, size: '100', sort: 'date,asc' });
+        const events = (body._embedded?.events ?? []) as any[];
+        const now = new Date().toISOString();
+        db.transaction(() => {
+          for (const ev of events) {
+            if (!ev?.id) continue;
+            const venue = ev._embedded?.venues?.[0];
+            const when = ev.dates?.start?.dateTime ?? ev.dates?.start?.localDate;
+            const country = venue?.country?.countryCode;
+            const fresh = !exists.get(ev.id);
+            db.run(
+              `INSERT INTO events (id, artist_id, name, datetime, venue, city, country, url, first_seen_at, last_seen_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                 datetime = excluded.datetime, venue = excluded.venue, city = excluded.city,
+                 country = excluded.country, url = excluded.url, last_seen_at = excluded.last_seen_at`,
+              ev.id, artist.id, ev.name, when, venue?.name, venue?.city?.name, country, ev.url, now, now,
+            );
+            found++;
+            if (fresh && country && NEAR().includes(country) && (when ?? '') >= now.slice(0, 10)) {
+              newNear.push({
+                text: `🎫 ${artist.name}: ${venue?.name ?? '?'}, ${venue?.city?.name ?? '?'} — ${(when ?? '').slice(0, 10)}`,
+                url: ev.url ?? '',
+              });
+            }
+          }
+        });
+        await sleep(250);
+      }
+      db.run('UPDATE artists SET events_synced_at = ? WHERE id = ?', new Date().toISOString(), artist.id);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        console.warn('Concerts: Ticketmaster rejected the API key (401) — check TICKETMASTER_API_KEY');
+        return found;
+      }
+      if (err instanceof ApiError && err.status === 429) {
+        console.warn('Concerts: Ticketmaster daily rate limit hit — resuming next run');
+        return found;
+      }
+      throw err;
+    }
+  }
+  if (newNear.length > 3) {
+    // One digest instead of a ping-storm (e.g. the very first run with a key).
+    await notifyShow(`${newNear.length} new shows near you:\n${newNear.map((s) => s.text).join('\n')}`, '');
+  } else {
+    for (const show of newNear) await notifyShow(show.text, show.url);
+  }
+  if (newNear.length) console.log(`  ${newNear.length} new nearby shows announced`);
+  return found;
+}
+
+async function notifyShow(message: string, clickUrl: string): Promise<void> {
+  const token = ntfyToken();
+  if (!token) return;
+  try {
+    const headers: Record<string, string> = { authorization: `Bearer ${token}`, 'x-title': 'Show near you', 'x-tags': 'ticket' };
+    if (clickUrl) headers['x-click'] = clickUrl;
+    await fetch(`${NTFY_URL}/${NTFY_TOPIC}`, { method: 'POST', headers, body: message });
+  } catch (err) {
+    console.warn(`ntfy unreachable: ${(err as Error).message}`);
+  }
+}
+
 async function main(): Promise<void> {
   await initAuth();
   const db = new TasteDb(DB_FILE);
@@ -453,6 +563,13 @@ async function main(): Promise<void> {
 
   console.log('Archiving cover art (CDN, not quota-limited)...');
   summary.images_archived = await archiveImages(db);
+
+  // Concerts run outside the Spotify-quota try: different API, own limits.
+  try {
+    summary.events_seen = await syncEvents(db);
+  } catch (err) {
+    console.warn(`Concerts sync failed: ${(err as Error).message}`);
+  }
 
   summary.total_tracks = db.count('tracks');
   summary.total_artists = db.count('artists');

@@ -8,25 +8,29 @@
 # install and no image to build. System Node on the Pi is v18; the script
 # needs >=23.6.
 #
-# The interval is hardcoded in the command (compose would interpolate
-# ${VAR} syntax at parse time): 6h, chosen so the 50-item recently-played
-# API window doesn't roll over unseen. A quota-exhausted run exits 0 almost
-# immediately and the loop just sleeps until the next attempt.
+# Runs once a day at 04:00 (Joe's call, 2026-08-06 — was 6-hourly). The
+# sleep-until-4am is computed by node because busybox date can't do it and
+# node carries its own tz database (TZ below works without OS tzdata).
+# Caveat that comes with daily: the recently-played API only exposes the
+# last 50 plays, so a >50-track listening day loses the overflow — the
+# extended-history import is the real backstop for completeness.
 services:
   exporter:
     image: node:24-alpine
     container_name: spotify-taste-db
     working_dir: /app
-    command: ["sh", "-c", "while true; do node --disable-warning=ExperimentalWarning src/main.ts; echo \"--- sleeping 6h ($$(date))\"; sleep 21600; done"]
+    command: ["sh", "-c", "while true; do node --disable-warning=ExperimentalWarning src/main.ts; S=$$(node -e \"const n=new Date(),t=new Date(n);t.setHours(4,0,0,0);if(t<=n)t.setDate(t.getDate()+1);console.log(Math.ceil((t-n)/1000))\"); echo \"--- sleeping $${S}s until 04:00\"; sleep $$S; done"]
     restart: unless-stopped
     init: true
     # homelab-net + token: new-release alerts publish to the ntfy container
     # (write-only service account "spotify", same pattern as n8n/beszel).
     networks: [default, homelab-net]
     environment:
+      TZ: "Europe/Amsterdam"
       NTFY_URL: "http://ntfy:8080"
       NTFY_TOPIC: "homelab"
       NTFY_TOKEN_FILE: "/run/secrets/ntfy-token"
+      EVENT_COUNTRIES: "NL,BE,DE"
     volumes:
       - .:/app
       - /etc/homelab/spotify-taste-db/ntfy-token:/run/secrets/ntfy-token:ro
@@ -47,6 +51,9 @@ services:
     command: ["node", "--disable-warning=ExperimentalWarning", "src/server.ts"]
     restart: unless-stopped
     init: true
+    environment:
+      TZ: "Europe/Amsterdam"
+      EVENT_COUNTRIES: "NL,BE,DE"
     volumes:
       - .:/app
     networks: [default, homelab-net]

@@ -101,6 +101,9 @@ const api: Record<string, (params: URLSearchParams) => unknown> = {
       topRanks: query(`
         SELECT time_range, MIN(rank) AS rank FROM top_artists
         WHERE artist_id = ? GROUP BY time_range`, id),
+      events: query(`
+        SELECT * FROM events WHERE artist_id = ? AND datetime >= date('now')
+        ORDER BY datetime`, id),
     };
   },
 
@@ -218,6 +221,74 @@ const api: Record<string, (params: URLSearchParams) => unknown> = {
     LEFT JOIN albums al ON al.id = t.album_id
     WHERE tt.time_range = ? ORDER BY tt.rank`, params.get('range') ?? 'medium_term'),
 
+  // Wrapped-style play stats for any date range. Unifies the GDPR lifetime
+  // history with the API's rolling capture (API rows only after the history
+  // ends, so the overlap window isn't double-counted). History rows under
+  // 30s are skips and don't count — same threshold Spotify uses.
+  '/api/wrapped': (params) => {
+    const from = params.get('from') ?? '0000';
+    const to = (params.get('to') ?? '9999') + '~'; // '~' sorts after any ISO char
+    const cte = `
+      WITH unified AS (
+        SELECT ts, track_id, track_name, artist_name, album_name, ms_played
+        FROM history_plays WHERE ms_played >= 30000
+        UNION ALL
+        SELECT p.played_at, p.track_id, t.name,
+               (SELECT group_concat(a.name, ', ' ORDER BY ta.position)
+                  FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
+                 WHERE ta.track_id = p.track_id),
+               (SELECT al.name FROM albums al WHERE al.id = t.album_id),
+               COALESCE(t.duration_ms, 210000)
+        FROM plays p LEFT JOIN tracks t ON t.id = p.track_id
+        WHERE p.played_at > COALESCE((SELECT MAX(ts) FROM history_plays), '')
+      ),
+      ranged AS (SELECT * FROM unified WHERE ts >= ?1 AND ts <= ?2)
+    `;
+    return {
+      totals: query(`${cte}
+        SELECT COUNT(*) plays, SUM(ms_played) ms,
+               COUNT(DISTINCT COALESCE(track_id, track_name)) tracks,
+               COUNT(DISTINCT artist_name) artists
+        FROM ranged`, from, to)[0],
+      topTracks: query(`${cte}
+        SELECT MAX(track_id) id, track_name, artist_name, COUNT(*) plays, SUM(ms_played) ms
+        FROM ranged GROUP BY COALESCE(track_id, track_name || '~' || COALESCE(artist_name, ''))
+        ORDER BY plays DESC LIMIT 100`, from, to),
+      topArtists: query(`${cte}
+        SELECT r.artist_name, COUNT(*) plays, SUM(r.ms_played) ms,
+               MAX(a.id) artist_id, MAX(a.image_url) image_url
+        FROM ranged r LEFT JOIN artists a ON a.name = r.artist_name
+        WHERE r.artist_name IS NOT NULL
+        GROUP BY r.artist_name ORDER BY plays DESC LIMIT 100`, from, to),
+      topAlbums: query(`${cte}
+        SELECT r.album_name, r.artist_name, COUNT(*) plays,
+               MAX(al.id) album_id, MAX(al.image_url) image_url
+        FROM ranged r LEFT JOIN albums al ON al.name = r.album_name
+        WHERE r.album_name IS NOT NULL
+        GROUP BY r.album_name, r.artist_name ORDER BY plays DESC LIMIT 50`, from, to),
+      perMonth: query(`${cte}
+        SELECT substr(ts, 1, 7) AS month, COUNT(*) AS n
+        FROM ranged GROUP BY month ORDER BY month`, from, to),
+      years: (query(`SELECT DISTINCT substr(ts, 1, 4) y FROM history_plays
+                     UNION SELECT DISTINCT substr(played_at, 1, 4) FROM plays ORDER BY y`) as { y: string }[])
+        .map((r) => r.y),
+    };
+  },
+
+  '/api/events': () => {
+    const near = (process.env.EVENT_COUNTRIES ?? 'NL').split(',').map((c) => c.trim().toUpperCase());
+    const rows = query(`
+      SELECT e.*, a.name AS artist_name, a.image_url
+      FROM events e LEFT JOIN artists a ON a.id = e.artist_id
+      WHERE e.datetime >= date('now')
+      ORDER BY e.datetime`) as { country: string }[];
+    return {
+      countries: near,
+      near: rows.filter((r) => near.includes(r.country)),
+      elsewhere: rows.filter((r) => !near.includes(r.country)),
+    };
+  },
+
   '/api/plays': () => query(`
     SELECT p.played_at, p.context_type, t.id, t.name, al.image_url, al.id AS album_id,
            (SELECT group_concat(a.name, ', ' ORDER BY ta.position)
@@ -233,8 +304,11 @@ const server = http.createServer((req, res) => {
   try {
     const handler = api[url.pathname];
     if (handler) {
+      // Serialize BEFORE writeHead — a handler that throws mid-write would
+      // otherwise crash the process with ERR_HTTP_HEADERS_SENT.
+      const body = JSON.stringify(handler(url.searchParams));
       res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-      res.end(JSON.stringify(handler(url.searchParams)));
+      res.end(body);
       return;
     }
     if (url.pathname === '/' || url.pathname === '/index.html') {
