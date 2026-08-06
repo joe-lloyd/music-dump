@@ -161,7 +161,7 @@ function tipOn(el, text) {
   el.addEventListener('mouseleave', () => { tip.style.opacity = 0; });
 }
 
-function monthChart(data) {
+function monthChart(data, word = 'liked') {
   if (!data.length) return '<div class="empty">no data</div>';
   const W = 640, H = 150, pad = 4, bw = Math.max(2, Math.floor(W / data.length) - 2);
   const max = Math.max(...data.map((d) => d.n));
@@ -170,12 +170,51 @@ function monthChart(data) {
     const h = Math.max(2, Math.round((d.n / max) * (H - 30)));
     const x = Math.round((i / data.length) * W);
     const label = d === peak ? `<text x="${x + bw / 2}" y="${H - h - 26}" text-anchor="middle">${d.n}</text>` : '';
-    return `<g data-tip="${esc(d.month)} · ${d.n} liked">${label}<rect x="${x}" y="${H - h - 20}" width="${bw}" height="${h}" rx="2" fill="var(--accent)"/></g>`;
+    return `<g data-tip="${esc(d.month)} · ${d.n} ${word}">${label}<rect x="${x}" y="${H - h - 20}" width="${bw}" height="${h}" rx="2" fill="var(--accent)"/></g>`;
   }).join('');
   return `<svg viewBox="0 0 ${W} ${H}" style="width:100%">${bars}
     <text x="${pad}" y="${H - 6}">${esc(data[0].month)}</text>
     <text x="${W - pad}" y="${H - 6}" text-anchor="end">${esc(data[data.length - 1].month)}</text></svg>`;
 }
+
+const debounce = (fn, ms = 300) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
+
+// Incremental fetch-and-append over a paged endpoint; search resets it.
+function pager({ url, pageSize, container, moreBtn, render, empty }) {
+  let offset = 0, q = '', busy = false;
+  const load = async () => {
+    if (busy) return;
+    busy = true; moreBtn.disabled = true;
+    const rows = await (await fetch(`${url}?q=${encodeURIComponent(q)}&limit=${pageSize}&offset=${offset}`)).json();
+    if (offset === 0) container.innerHTML = '';
+    container.insertAdjacentHTML('beforeend', rows.map(render).join(''));
+    if (offset === 0 && !rows.length) container.innerHTML = `<div class="empty">${empty}</div>`;
+    offset += rows.length;
+    moreBtn.style.display = rows.length < pageSize ? 'none' : '';
+    busy = false; moreBtn.disabled = false;
+  };
+  moreBtn.addEventListener('click', load);
+  load();
+  return { search(v) { q = v; offset = 0; load(); } };
+}
+
+// Album header + compact track rows for the grouped Songs sections.
+const groupHead = (al) => `
+  <div class="row" style="border-bottom:none;padding-top:1rem">
+    <a href="#album/${al.id}">${pic('albums', al.id, al.image_url, al.name)}</a>
+    <div class="mid">
+      <div><a href="#album/${al.id}"><b>${esc(al.name)}</b></a>${al.removed_at ? ' ' + chip(`removed ${day(al.removed_at)}`, true) : ''}</div>
+      <div class="sub">${esc(al.artists ?? '')}${al.release_date ? ' · ' + al.release_date.slice(0, 4) : ''}</div>
+    </div>
+  </div>`;
+const slimRow = (t, endText) => `
+  <div class="row${t.removed_at ? ' gone' : ''}" style="margin-left:3rem">
+    <span class="heart">${t.liked || (t.added_at && !t.removed_at) ? '♥' : ''}</span>
+    <div class="mid"><div>${esc(t.name)} ${t.removed_at ? chip(`un-liked ${day(t.removed_at)}`, true) : ''}</div></div>
+    <div class="end">${endText ?? dur(t.duration_ms)}</div>
+    ${spotify('track', t.id)}
+  </div>`;
+const songGroup = (al) => groupHead(al) + `<div class="rows">${al.tracks.map((t) => slimRow(t)).join('')}</div>`;
 
 // Track row: internal album link, explicit ↗ for Spotify. `gone` greys +
 // badges rows that were un-liked / removed from a playlist.
@@ -207,8 +246,10 @@ const views = {
   async overview() {
     const s = await api('/api/stats');
     const c = s.counts;
+    const h = s.history;
     const tiles = [['liked songs', c.liked], ['artists', c.artists], ['followed', c.followed],
-                   ['saved albums', c.albums], ['playlists', c.playlists], ['plays captured', c.plays]]
+                   ['saved albums', c.albums], ['playlists', c.playlists], ['plays captured', c.plays],
+                   ...(h ? [['lifetime plays', Number(h.n).toLocaleString()], ['hours listened', Math.round(h.ms / 3.6e6).toLocaleString()]] : [])]
       .map(([k, v]) => `<div class="tile"><b>${v}</b><span>${k}</span></div>`).join('');
     const gmax = Math.max(...s.genres.map((g) => g.n), 1);
     const gbars = s.genres.map((g) => `
@@ -220,6 +261,7 @@ const views = {
         <div class="card"><h2>Liked songs added per month</h2>${monthChart(s.likedPerMonth)}</div>
         <div class="card"><h2>Top genres (by liked tracks)</h2>
           ${s.genres.length ? `<div class="bars">${gbars}</div>` : '<div class="empty">genres still hydrating — check back after the next sync</div>'}</div>
+        ${h ? `<div class="card"><h2>Lifetime listening per month (${day(h.first)} → ${day(h.last)})</h2>${monthChart(h.perMonth, 'plays')}</div>` : ''}
       </div>`;
   },
 
@@ -234,15 +276,19 @@ const views = {
   async liked() {
     const all = await api('/api/tracks');
     const goneN = all.filter((t) => t.removed_at).length;
-    return `<div class="tools"><input type="search" id="q" placeholder="search ${all.length} liked songs…">
+    return `<div class="tools"><input type="search" id="q" placeholder="search songs…">
       <label class="chk"><input type="checkbox" id="gone"> show un-liked (${goneN})</label></div>
-      <div class="rows" id="out"></div>`;
+      <h2>Liked (${all.length - goneN})</h2><div id="likedOut"></div>
+      <h2>Everything in the library</h2><div id="allOut"></div>
+      <div style="text-align:center;margin-top:1rem"><button class="spbtn" id="more">load more</button></div>`;
   },
 
   async albums() {
-    const all = await api('/api/albums');
-    if (!all.length) return '<div class="empty">no saved albums synced yet</div>';
-    return `<div class="grid">${all.map(albumCell).join('')}</div>`;
+    const saved = await api('/api/albums');
+    return `<div class="tools"><input type="search" id="q" placeholder="search albums…"></div>
+      ${saved.length ? `<h2>Saved (${saved.length})</h2><div class="grid" id="savedOut"></div>` : ''}
+      <h2>All albums</h2><div class="grid" id="allOut"></div>
+      <div style="text-align:center;margin-top:1rem"><button class="spbtn" id="more">load more</button></div>`;
   },
 
   async playlists() {
@@ -363,16 +409,50 @@ const after = {
   },
   liked(el) {
     api('/api/tracks').then((all) => {
-      const out = $('#out', el), q = $('#q', el), gone = $('#gone', el);
+      const likedOut = $('#likedOut', el), q = $('#q', el), gone = $('#gone', el);
+      // Liked songs, grouped by album, most recently liked group first.
       const draw = () => {
         const needle = q.value.toLowerCase();
         const rows = all.filter((t) => (gone.checked || !t.removed_at) &&
           (!needle || `${t.name} ${t.artists} ${t.album}`.toLowerCase().includes(needle)));
-        out.innerHTML = rows.slice(0, 500).map((t) => trackRow(t, `${day(t.added_at)}<br>${dur(t.duration_ms)}`)).join('')
-          || '<div class="empty">no matches</div>';
+        const byAlbum = new Map();
+        for (const t of rows) {
+          const key = t.album_id ?? `~${t.id}`;
+          if (!byAlbum.has(key)) byAlbum.set(key, { id: t.album_id, name: t.album, image_url: t.image_url, release_date: t.release_date, artists: t.artists, tracks: [] });
+          byAlbum.get(key).tracks.push(t);
+        }
+        likedOut.innerHTML = [...byAlbum.values()].map((al) =>
+          groupHead(al) + `<div class="rows">${al.tracks.map((t) => slimRow(t, `${day(t.added_at)} · ${dur(t.duration_ms)}`)).join('')}</div>`
+        ).join('') || '<div class="empty">no matches</div>';
       };
-      q.addEventListener('input', draw); gone.addEventListener('change', draw); draw();
+      const paged = pager({
+        url: '/api/songs', pageSize: 40,
+        container: $('#allOut', el), moreBtn: $('#more', el),
+        render: songGroup, empty: 'nothing yet — track listings hydrate over the next sync runs',
+      });
+      q.addEventListener('input', debounce(() => { draw(); paged.search(q.value); }));
+      gone.addEventListener('change', draw);
+      draw();
     });
+  },
+  albums(el) {
+    const q = $('#q', el), savedOut = $('#savedOut', el);
+    const drawSaved = () => {
+      if (!savedOut) return;
+      api('/api/albums').then((saved) => {
+        const needle = q.value.toLowerCase();
+        savedOut.innerHTML = saved
+          .filter((a) => !needle || `${a.name} ${a.artists}`.toLowerCase().includes(needle))
+          .map(albumCell).join('') || '<div class="empty">no matches</div>';
+      });
+    };
+    const paged = pager({
+      url: '/api/albums-all', pageSize: 120,
+      container: $('#allOut', el), moreBtn: $('#more', el),
+      render: albumCell, empty: 'discography crawl still running — this fills in over the coming days',
+    });
+    q.addEventListener('input', debounce(() => { drawSaved(); paged.search(q.value); }));
+    drawSaved();
   },
   playlists(el) {
     const seg = $('#plseg', el), out = $('#out', el);
@@ -413,7 +493,7 @@ const after = {
   },
 };
 
-const TABS = { overview: 'Overview', artists: 'Artists', liked: 'Liked', albums: 'Albums', playlists: 'Playlists', top: 'Top', plays: 'Plays' };
+const TABS = { overview: 'Overview', artists: 'Artists', liked: 'Songs', albums: 'Albums', playlists: 'Playlists', top: 'Top', plays: 'Plays' };
 const nav = $('#nav');
 nav.innerHTML = Object.entries(TABS).map(([k, v]) => `<button data-t="${k}">${v}</button>`).join('');
 nav.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) location.hash = b.dataset.t; });

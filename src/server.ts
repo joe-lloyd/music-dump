@@ -43,6 +43,14 @@ const api: Record<string, (params: URLSearchParams) => unknown> = {
       likedPerMonth: query(`
         SELECT substr(added_at, 1, 7) AS month, COUNT(*) AS n
         FROM liked_tracks GROUP BY month ORDER BY month`),
+      history: (query('SELECT COUNT(*) n, SUM(ms_played) ms FROM history_plays')[0] as { n: number; ms: number }).n
+        ? {
+            ...query('SELECT COUNT(*) n, SUM(ms_played) ms, MIN(ts) first, MAX(ts) last FROM history_plays')[0] as object,
+            perMonth: query(`
+              SELECT substr(ts, 1, 7) AS month, COUNT(*) AS n
+              FROM history_plays GROUP BY month ORDER BY month`),
+          }
+        : null,
     };
   },
 
@@ -119,6 +127,53 @@ const api: Record<string, (params: URLSearchParams) => unknown> = {
              WHERE aa.album_id = al.id) AS artists
     FROM albums al WHERE al.is_saved = 1 OR al.unsaved_at IS NOT NULL
     ORDER BY al.saved_at DESC`),
+
+  // Everything the discography crawl knows that isn't in the saved section.
+  // Server-side paging + search — this grows to thousands of rows.
+  '/api/albums-all': (params) => {
+    const q = `%${params.get('q') ?? ''}%`;
+    const limit = Math.min(Number(params.get('limit') ?? 120), 500);
+    const offset = Number(params.get('offset') ?? 0);
+    return query(`
+      SELECT al.id, al.name, al.album_type, al.release_date, al.image_url,
+             al.total_tracks, al.is_saved, al.unsaved_at, al.removed_at,
+             (SELECT group_concat(a.name, ', ' ORDER BY aa.position)
+                FROM album_artists aa JOIN artists a ON a.id = aa.artist_id
+               WHERE aa.album_id = al.id) AS artists
+      FROM albums al
+      WHERE al.is_saved = 0 AND al.unsaved_at IS NULL
+        AND (al.name LIKE ?1 OR artists LIKE ?1)
+      ORDER BY al.release_date DESC
+      LIMIT ?2 OFFSET ?3`, q, limit, offset);
+  },
+
+  // Whole track library grouped by album: a page of albums, each with its
+  // tracks nested. Search matches album, artist, or track names.
+  '/api/songs': (params) => {
+    const q = `%${params.get('q') ?? ''}%`;
+    const limit = Math.min(Number(params.get('limit') ?? 40), 200);
+    const offset = Number(params.get('offset') ?? 0);
+    const albums = query(`
+      SELECT al.id, al.name, al.image_url, al.release_date, al.removed_at,
+             (SELECT group_concat(a.name, ', ' ORDER BY aa.position)
+                FROM album_artists aa JOIN artists a ON a.id = aa.artist_id
+               WHERE aa.album_id = al.id) AS artists
+      FROM albums al
+      WHERE EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = al.id)
+        AND (al.name LIKE ?1 OR artists LIKE ?1
+             OR EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = al.id AND t.name LIKE ?1))
+      ORDER BY al.release_date DESC
+      LIMIT ?2 OFFSET ?3`, q, limit, offset) as { id: string }[];
+    if (!albums.length) return [];
+    const marks = albums.map(() => '?').join(',');
+    const tracks = query(`
+      SELECT t.album_id, t.id, t.name, t.disc_number, t.track_number, t.duration_ms,
+             (lt.track_id IS NOT NULL AND lt.removed_at IS NULL) AS liked
+      FROM tracks t LEFT JOIN liked_tracks lt ON lt.track_id = t.id
+      WHERE t.album_id IN (${marks})
+      ORDER BY t.album_id, t.disc_number, t.track_number`, ...albums.map((a) => a.id)) as { album_id: string }[];
+    return albums.map((al) => ({ ...al, tracks: tracks.filter((t) => t.album_id === al.id) }));
+  },
 
   '/api/playlists': () => query(`
     SELECT p.id, p.name, p.description, p.owner_name, p.total_tracks, p.removed_at,

@@ -115,6 +115,25 @@ so a second machine invalidates the first's `tokens.json`. The Pi is the
 runner; re-authorize (delete `tokens.json`, run once interactively) if the
 token ever breaks.
 
+## Importing your lifetime listening history
+
+Request "Extended streaming history" at <https://www.spotify.com/account/privacy/>
+(takes days to arrive). Unzip it, then load it into `history_plays`:
+
+```sh
+# locally (Node >= 23.6)
+node src/import-history.ts ~/Downloads/my_spotify_data/
+
+# on the Pi (host Node is too old — use the container)
+scp -r ~/Downloads/my_spotify_data pi:history-export
+ssh pi 'docker run --rm -v /home/pi-admin/spotify-taste-db:/app -v /home/pi-admin/history-export:/export -w /app node:24-alpine node src/import-history.ts /export'
+```
+
+Handles both the extended format (`Streaming_History_Audio_*.json`,
+`endsong_*.json`) and the basic account-data format (`StreamingHistory*.json`);
+podcast episodes are skipped and re-imports dedupe. The Overview page picks it
+up automatically (lifetime plays, hours listened, per-month chart).
+
 ## Known limits
 
 - **Daily API quota** (dev-mode apps, 2026): a long `retry-after` makes the run

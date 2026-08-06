@@ -116,6 +116,26 @@ CREATE TABLE IF NOT EXISTS artist_albums (
   PRIMARY KEY (artist_id, album_id)
 );
 
+-- Lifetime listening history from Spotify's GDPR "Extended streaming history"
+-- export, loaded by src/import-history.ts. Kept separate from the plays table
+-- (the rolling API capture): different fidelity, different source. The PK
+-- dedupes re-imports of overlapping exports.
+CREATE TABLE IF NOT EXISTS history_plays (
+  ts TEXT NOT NULL,
+  track_name TEXT NOT NULL DEFAULT '',
+  ms_played INTEGER NOT NULL DEFAULT 0,
+  track_id TEXT,               -- parsed from spotify_track_uri when present
+  artist_name TEXT,
+  album_name TEXT,
+  platform TEXT,
+  country TEXT,
+  reason_start TEXT,
+  reason_end TEXT,
+  shuffle INTEGER,
+  skipped INTEGER,
+  PRIMARY KEY (ts, track_name, ms_played)
+);
+
 CREATE TABLE IF NOT EXISTS sync_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   started_at TEXT NOT NULL,
@@ -126,6 +146,8 @@ CREATE TABLE IF NOT EXISTS sync_runs (
 CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album_id);
 CREATE INDEX IF NOT EXISTS idx_track_artists_artist ON track_artists(artist_id);
 CREATE INDEX IF NOT EXISTS idx_plays_track ON plays(track_id);
+CREATE INDEX IF NOT EXISTS idx_history_track ON history_plays(track_id);
+CREATE INDEX IF NOT EXISTS idx_history_month ON history_plays(substr(ts, 1, 7));
 `;
 
 // node:sqlite rejects undefined and booleans as bind values.
