@@ -179,23 +179,29 @@ function monthChart(data, word = 'liked') {
 
 const debounce = (fn, ms = 300) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 
-// Incremental fetch-and-append over a paged endpoint; search resets it.
+// Streams ALL pages of a paged endpoint into the DOM automatically (small
+// pauses between pages keep the browser responsive). Everything ends up
+// rendered, so browser find (cmd+F) sees the whole library. Search restarts
+// the stream; a generation counter cancels a superseded run.
 function pager({ url, pageSize, container, moreBtn, render, empty }) {
-  let offset = 0, q = '', busy = false;
-  const load = async () => {
-    if (busy) return;
-    busy = true; moreBtn.disabled = true;
-    const rows = await (await fetch(`${url}?q=${encodeURIComponent(q)}&limit=${pageSize}&offset=${offset}`)).json();
-    if (offset === 0) container.innerHTML = '';
-    container.insertAdjacentHTML('beforeend', rows.map(render).join(''));
-    if (offset === 0 && !rows.length) container.innerHTML = `<div class="empty">${empty}</div>`;
-    offset += rows.length;
-    moreBtn.style.display = rows.length < pageSize ? 'none' : '';
-    busy = false; moreBtn.disabled = false;
+  if (moreBtn) moreBtn.style.display = 'none';
+  let q = '', gen = 0;
+  const start = async () => {
+    const g = ++gen;
+    let offset = 0;
+    while (g === gen) {
+      const rows = await (await fetch(`${url}?q=${encodeURIComponent(q)}&limit=${pageSize}&offset=${offset}`)).json();
+      if (g !== gen) return;
+      if (offset === 0) container.innerHTML = '';
+      container.insertAdjacentHTML('beforeend', rows.map(render).join(''));
+      if (offset === 0 && !rows.length) container.innerHTML = `<div class="empty">${empty}</div>`;
+      offset += rows.length;
+      if (rows.length < pageSize) return;
+      await new Promise((r) => setTimeout(r, 30));
+    }
   };
-  moreBtn.addEventListener('click', load);
-  load();
-  return { search(v) { q = v; offset = 0; load(); } };
+  start();
+  return { search(v) { q = v; start(); } };
 }
 
 // Album header + compact track rows for the grouped Songs sections.
@@ -395,7 +401,7 @@ const after = {
         const rows = all.filter((a) =>
           (!fol.checked || a.is_followed) &&
           (!needle || a.name.toLowerCase().includes(needle) || (a.genres ?? '').toLowerCase().includes(needle)));
-        out.innerHTML = rows.slice(0, 400).map((a) => `
+        out.innerHTML = rows.map((a) => `
           <div class="cell">
             <a href="#artist/${a.id}">${pic('artists', a.id, a.image_url, a.name)}
               <div class="nm">${a.is_followed ? '★ ' : ''}${esc(a.name)}</div></a>
@@ -426,7 +432,7 @@ const after = {
         ).join('') || '<div class="empty">no matches</div>';
       };
       const paged = pager({
-        url: '/api/songs', pageSize: 40,
+        url: '/api/songs', pageSize: 200,
         container: $('#allOut', el), moreBtn: $('#more', el),
         render: songGroup, empty: 'nothing yet — track listings hydrate over the next sync runs',
       });
@@ -447,7 +453,7 @@ const after = {
       });
     };
     const paged = pager({
-      url: '/api/albums-all', pageSize: 120,
+      url: '/api/albums-all', pageSize: 500,
       container: $('#allOut', el), moreBtn: $('#more', el),
       render: albumCell, empty: 'discography crawl still running — this fills in over the coming days',
     });
@@ -471,7 +477,7 @@ const after = {
     const seg = $('#rseg', el);
     const load = (range) => {
       api(`/api/top-artists?range=${range}`).then((rows) => {
-        $('#ta', el).innerHTML = rows.slice(0, 50).map((a) => `
+        $('#ta', el).innerHTML = rows.map((a) => `
           <div class="row"><span class="rank">${a.rank}</span>
             <a href="#artist/${a.id}">${pic('artists', a.id, a.image_url, a.name)}</a>
             <div class="mid"><div><a href="#artist/${a.id}">${esc(a.name)}</a></div>
@@ -480,7 +486,7 @@ const after = {
           || '<div class="empty">not synced yet</div>';
       });
       api(`/api/top-tracks?range=${range}`).then((rows) => {
-        $('#tt', el).innerHTML = rows.slice(0, 50).map((t) => trackRow(t, '', t.rank)).join('')
+        $('#tt', el).innerHTML = rows.map((t) => trackRow(t, '', t.rank)).join('')
           || '<div class="empty">not synced yet</div>';
       });
     };

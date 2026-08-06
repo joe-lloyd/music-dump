@@ -194,7 +194,7 @@ const api: Record<string, (params: URLSearchParams) => unknown> = {
   '/api/top-artists': (params) => query(`
     SELECT ta.rank, a.id, a.name, a.genres, a.image_url, a.is_followed
     FROM top_artists ta JOIN artists a ON a.id = ta.artist_id
-    WHERE ta.time_range = ? ORDER BY ta.rank LIMIT 100`, params.get('range') ?? 'medium_term'),
+    WHERE ta.time_range = ? ORDER BY ta.rank`, params.get('range') ?? 'medium_term'),
 
   '/api/top-tracks': (params) => query(`
     SELECT tt.rank, t.id, t.name, al.name AS album, al.image_url,
@@ -203,7 +203,7 @@ const api: Record<string, (params: URLSearchParams) => unknown> = {
              WHERE ta.track_id = t.id) AS artists
     FROM top_tracks tt JOIN tracks t ON t.id = tt.track_id
     LEFT JOIN albums al ON al.id = t.album_id
-    WHERE tt.time_range = ? ORDER BY tt.rank LIMIT 100`, params.get('range') ?? 'medium_term'),
+    WHERE tt.time_range = ? ORDER BY tt.rank`, params.get('range') ?? 'medium_term'),
 
   '/api/plays': () => query(`
     SELECT p.played_at, p.context_type, t.id, t.name, al.image_url, al.id AS album_id,
