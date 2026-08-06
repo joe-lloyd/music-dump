@@ -286,6 +286,12 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
+  if (err instanceof ApiError && err.status === 429) {
+    // Everything synced so far is committed, and hydration resumes from its
+    // NULL markers — the next scheduled run picks up where this one stopped.
+    console.log(`\n${err.message} — stopping this run; the next one resumes automatically.`);
+    process.exit(0);
+  }
   console.error(err);
   process.exit(1);
 });

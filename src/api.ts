@@ -24,6 +24,11 @@ export async function get<T>(pathOrUrl: string, params?: Record<string, string>)
 
     if (res.status === 429) {
       const waitSec = Number(res.headers.get('retry-after')) || 5;
+      // A retry-after in the hours means the daily quota is spent, not the
+      // rolling window — bail out and let the next scheduled run resume.
+      if (waitSec > 600) {
+        throw new ApiError(`Daily API quota exhausted (retry-after ${Math.round(waitSec / 3600)}h)`, 429);
+      }
       console.log(`  rate limited, waiting ${waitSec}s...`);
       await sleep(waitSec * 1000 + 500);
       continue;
