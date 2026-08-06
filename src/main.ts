@@ -46,29 +46,30 @@ interface PlayItem {
 
 async function syncLikedTracks(db: TasteDb): Promise<number> {
   console.log('Liked songs...');
-  db.run('DELETE FROM liked_tracks');
-  let count = 0;
+  const present: string[] = [];
   for await (const page of paginate<SavedTrackItem>('/me/tracks')) {
     db.transaction(() => {
       for (const item of page.items) {
         if (!item.track?.id) continue;
         db.upsertTrack(item.track);
-        db.run('INSERT OR REPLACE INTO liked_tracks (track_id, added_at) VALUES (?, ?)', item.track.id, item.added_at);
-        count++;
+        db.run('INSERT OR REPLACE INTO liked_tracks (track_id, added_at, removed_at) VALUES (?, ?, NULL)', item.track.id, item.added_at);
+        present.push(item.track.id);
       }
     });
-    console.log(`  ${count}/${page.total ?? '?'}`);
+    console.log(`  ${present.length}/${page.total ?? '?'}`);
   }
-  return count;
+  const unliked = db.markMissing('liked_tracks', 'track_id', 'removed_at', present);
+  if (unliked) console.log(`  ${unliked} un-liked (kept, tagged removed_at)`);
+  return present.length;
 }
 
 async function syncSavedAlbums(db: TasteDb): Promise<number> {
   console.log('Saved albums...');
-  db.run('UPDATE albums SET is_saved = 0, saved_at = NULL');
-  let count = 0;
+  const present: string[] = [];
   for await (const page of paginate<SavedAlbumItem>('/me/albums')) {
     for (const item of page.items) {
       if (!item.album?.id) continue;
+      present.push(item.album.id);
       db.transaction(() => db.upsertAlbum(item.album, { savedAt: item.added_at }));
       // Album track listings are embedded (first 50) and paginate beyond that.
       let trackPage: { items?: ApiTrack[]; next?: string | null } | undefined = item.album.tracks;
@@ -80,29 +81,33 @@ async function syncSavedAlbums(db: TasteDb): Promise<number> {
         trackPage = trackPage.next ? await get<Page<ApiTrack>>(trackPage.next) : undefined;
       }
       db.run('UPDATE albums SET tracks_synced = 1 WHERE id = ?', item.album.id);
-      count++;
     }
-    console.log(`  ${count}/${page.total ?? '?'}`);
+    console.log(`  ${present.length}/${page.total ?? '?'}`);
   }
-  return count;
+  const unsaved = db.markMissing('albums', 'id', 'unsaved_at', present, 'is_saved = 1');
+  db.run('UPDATE albums SET is_saved = 0 WHERE unsaved_at IS NOT NULL');
+  if (unsaved) console.log(`  ${unsaved} un-saved (kept, tagged unsaved_at)`);
+  return present.length;
 }
 
 async function syncFollowedArtists(db: TasteDb): Promise<number> {
   console.log('Followed artists...');
-  db.run('UPDATE artists SET is_followed = 0');
-  let count = 0;
+  const present: string[] = [];
   const unwrap = (body: unknown) => (body as { artists: Page<ApiArtist> }).artists;
   for await (const page of paginate<ApiArtist>('/me/following', { type: 'artist' }, unwrap)) {
     db.transaction(() => {
       for (const artist of page.items) {
         if (!artist.id) continue;
         db.upsertArtist(artist, { followed: true });
-        count++;
+        present.push(artist.id);
       }
     });
-    console.log(`  ${count}/${page.total ?? '?'}`);
+    console.log(`  ${present.length}/${page.total ?? '?'}`);
   }
-  return count;
+  const unfollowed = db.markMissing('artists', 'id', 'unfollowed_at', present, 'is_followed = 1');
+  db.run('UPDATE artists SET is_followed = 0 WHERE unfollowed_at IS NOT NULL');
+  if (unfollowed) console.log(`  ${unfollowed} un-followed (kept, tagged unfollowed_at)`);
+  return present.length;
 }
 
 async function syncPlaylists(db: TasteDb): Promise<{ playlists: number; tracks: number; skipped: number }> {
@@ -110,9 +115,11 @@ async function syncPlaylists(db: TasteDb): Promise<{ playlists: number; tracks: 
   let playlists = 0;
   let tracks = 0;
   let skipped = 0; // episodes, local files, removed tracks
+  const presentPls: string[] = [];
   for await (const page of paginate<PlaylistItem>('/me/playlists')) {
     for (const pl of page.items) {
       if (!pl?.id) continue;
+      presentPls.push(pl.id);
       db.run(
         `INSERT OR REPLACE INTO playlists
            (id, name, description, owner_id, owner_name, is_public, is_collaborative, snapshot_id, total_tracks)
@@ -120,13 +127,18 @@ async function syncPlaylists(db: TasteDb): Promise<{ playlists: number; tracks: 
         pl.id, pl.name, pl.description, pl.owner?.id, pl.owner?.display_name,
         pl.public, pl.collaborative, pl.snapshot_id, pl.tracks?.total,
       );
-      db.run('DELETE FROM playlist_tracks WHERE playlist_id = ?', pl.id);
       // Dev-mode apps get 403 on /playlists/{id}/tracks, but the playlist
       // detail endpoint embeds the track pages: under `items` (new shape,
       // entries carry `item`) or `tracks` (legacy shape, entries carry `track`).
       const detail = await get<{ items?: Page<PlaylistTrackItem>; tracks?: Page<PlaylistTrackItem> }>(`/playlists/${pl.id}`);
       let trackPage: Page<PlaylistTrackItem> | undefined = detail.items ?? detail.tracks;
       db.run('UPDATE playlists SET total_tracks = ? WHERE id = ?', trackPage?.total ?? null, pl.id);
+      // Tombstone-then-restore: rows still present come back with
+      // removed_at NULL; rows gone from the playlist keep the stamp.
+      db.run(
+        `UPDATE playlist_tracks SET removed_at = ? WHERE playlist_id = ? AND removed_at IS NULL`,
+        new Date().toISOString(), pl.id,
+      );
       let position = 0;
       while (trackPage) {
         const entries = trackPage.items ?? [];
@@ -140,8 +152,8 @@ async function syncPlaylists(db: TasteDb): Promise<{ playlists: number; tracks: 
             }
             db.upsertTrack(track);
             db.run(
-              `INSERT OR REPLACE INTO playlist_tracks (playlist_id, track_id, position, added_at, added_by)
-               VALUES (?, ?, ?, ?, ?)`,
+              `INSERT OR REPLACE INTO playlist_tracks (playlist_id, track_id, position, added_at, added_by, removed_at)
+               VALUES (?, ?, ?, ?, ?, NULL)`,
               pl.id, track.id, position, entry.added_at, entry.added_by?.id,
             );
             tracks++;
@@ -162,6 +174,8 @@ async function syncPlaylists(db: TasteDb): Promise<{ playlists: number; tracks: 
       console.log(`  ${playlists}/${page.total ?? '?'}: ${pl.name} (${position} items)`);
     }
   }
+  const gone = db.markMissing('playlists', 'id', 'removed_at', presentPls);
+  if (gone) console.log(`  ${gone} playlists deleted upstream (kept, tagged removed_at)`);
   return { playlists, tracks, skipped };
 }
 
@@ -227,7 +241,12 @@ async function hydrate(db: TasteDb): Promise<void> {
       db.upsertArtist({ ...artist, genres: artist.genres ?? [] });
     } catch (err) {
       if (!(err instanceof ApiError && (err.status === 403 || err.status === 404))) throw err;
-      db.run(`UPDATE artists SET genres = '[]' WHERE id = ?`, id); // unreachable — don't refetch
+      // 404 = pulled from Spotify (tag it, keep the data); 403 = just blocked
+      // for this app. Either way mark hydrated so it isn't refetched forever.
+      db.run(
+        `UPDATE artists SET genres = '[]', removed_at = COALESCE(removed_at, ?) WHERE id = ?`,
+        err.status === 404 ? new Date().toISOString() : null, id,
+      );
     }
     if ((i + 1) % 100 === 0) console.log(`  ${i + 1}/${artistIds.length}`);
     await sleep(250);
@@ -264,7 +283,10 @@ async function hydrate(db: TasteDb): Promise<void> {
       db.run('UPDATE albums SET tracks_synced = 1 WHERE id = ?', id);
     } catch (err) {
       if (!(err instanceof ApiError && (err.status === 403 || err.status === 404))) throw err;
-      db.run(`UPDATE albums SET label = '', tracks_synced = 1 WHERE id = ?`, id); // unreachable — don't refetch
+      db.run(
+        `UPDATE albums SET label = '', tracks_synced = 1, removed_at = COALESCE(removed_at, ?) WHERE id = ?`,
+        err.status === 404 ? new Date().toISOString() : null, id,
+      );
     }
     if ((i + 1) % 100 === 0) console.log(`  ${i + 1}/${albumIds.length}`);
     await sleep(250);
@@ -298,8 +320,11 @@ async function syncDiscographies(db: TasteDb): Promise<number> {
       }
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
-        // ghost artist — mark done so it isn't retried forever
-        db.run('UPDATE artists SET discog_synced_at = ? WHERE id = ?', new Date().toISOString(), artist.id);
+        // pulled from Spotify — tag it, keep everything, don't retry forever
+        db.run(
+          'UPDATE artists SET discog_synced_at = ?, removed_at = COALESCE(removed_at, ?) WHERE id = ?',
+          new Date().toISOString(), new Date().toISOString(), artist.id,
+        );
         continue;
       }
       if (err instanceof ApiError && err.status === 403) {

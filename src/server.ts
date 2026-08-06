@@ -25,11 +25,11 @@ const api: Record<string, (params: URLSearchParams) => unknown> = {
     const one = (sql: string) => (query(sql)[0] as Record<string, unknown>) ?? {};
     return {
       counts: {
-        liked: one('SELECT COUNT(*) n FROM liked_tracks').n,
+        liked: one('SELECT COUNT(*) n FROM liked_tracks WHERE removed_at IS NULL').n,
         artists: one('SELECT COUNT(*) n FROM artists').n,
         followed: one('SELECT COUNT(*) n FROM artists WHERE is_followed = 1').n,
         albums: one('SELECT COUNT(*) n FROM albums WHERE is_saved = 1').n,
-        playlists: one('SELECT COUNT(*) n FROM playlists').n,
+        playlists: one('SELECT COUNT(*) n FROM playlists WHERE removed_at IS NULL').n,
         plays: one('SELECT COUNT(*) n FROM plays').n,
       },
       lastSync: one('SELECT MAX(finished_at) t FROM sync_runs').t,
@@ -38,6 +38,7 @@ const api: Record<string, (params: URLSearchParams) => unknown> = {
         FROM liked_tracks lt
         JOIN track_artists ta ON ta.track_id = lt.track_id
         JOIN artists a ON a.id = ta.artist_id, json_each(a.genres) je
+        WHERE lt.removed_at IS NULL
         GROUP BY je.value ORDER BY n DESC LIMIT 20`),
       likedPerMonth: query(`
         SELECT substr(added_at, 1, 7) AS month, COUNT(*) AS n
@@ -47,16 +48,62 @@ const api: Record<string, (params: URLSearchParams) => unknown> = {
 
   '/api/artists': () => query(`
     SELECT a.id, a.name, a.genres, a.popularity, a.followers, a.image_url, a.is_followed,
+           a.unfollowed_at, a.removed_at,
            (SELECT COUNT(*) FROM track_artists ta JOIN liked_tracks lt ON lt.track_id = ta.track_id
-             WHERE ta.artist_id = a.id) AS liked_count,
+             WHERE ta.artist_id = a.id AND lt.removed_at IS NULL) AS liked_count,
            (SELECT MIN(rank) FROM top_artists t WHERE t.artist_id = a.id AND t.time_range = 'medium_term') AS top_rank
     FROM artists a
-    WHERE a.is_followed = 1 OR liked_count > 0 OR top_rank IS NOT NULL
+    WHERE a.is_followed = 1 OR liked_count > 0 OR top_rank IS NOT NULL OR a.unfollowed_at IS NOT NULL
     ORDER BY liked_count DESC, a.followers DESC`),
 
+  '/api/artist': (params) => {
+    const id = params.get('id') ?? '';
+    return {
+      artist: query(`SELECT * FROM artists WHERE id = ?`, id)[0] ?? null,
+      albums: query(`
+        SELECT DISTINCT al.id, al.name, al.album_type, al.release_date, al.image_url,
+               al.total_tracks, al.is_saved, al.unsaved_at, al.removed_at, al.label,
+               COALESCE(aa.album_group, al.album_type) AS album_group
+        FROM albums al
+        LEFT JOIN artist_albums aa ON aa.album_id = al.id AND aa.artist_id = ?1
+        WHERE aa.artist_id = ?1
+           OR al.id IN (SELECT album_id FROM album_artists WHERE artist_id = ?1)
+        ORDER BY al.release_date DESC`, id),
+      liked: query(`
+        SELECT t.id, t.name, t.duration_ms, lt.added_at, lt.removed_at,
+               al.name AS album, al.id AS album_id, al.image_url
+        FROM track_artists ta
+        JOIN tracks t ON t.id = ta.track_id
+        JOIN liked_tracks lt ON lt.track_id = t.id
+        LEFT JOIN albums al ON al.id = t.album_id
+        WHERE ta.artist_id = ? ORDER BY lt.added_at DESC`, id),
+      topRanks: query(`
+        SELECT time_range, MIN(rank) AS rank FROM top_artists
+        WHERE artist_id = ? GROUP BY time_range`, id),
+    };
+  },
+
+  '/api/album': (params) => {
+    const id = params.get('id') ?? '';
+    return {
+      album: query(`SELECT * FROM albums WHERE id = ?`, id)[0] ?? null,
+      artists: query(`
+        SELECT a.id, a.name FROM album_artists aa JOIN artists a ON a.id = aa.artist_id
+        WHERE aa.album_id = ? ORDER BY aa.position`, id),
+      tracks: query(`
+        SELECT t.id, t.name, t.disc_number, t.track_number, t.duration_ms, t.explicit,
+               (SELECT group_concat(a.name, ', ' ORDER BY ta.position)
+                  FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
+                 WHERE ta.track_id = t.id) AS artists,
+               (lt.track_id IS NOT NULL AND lt.removed_at IS NULL) AS liked
+        FROM tracks t LEFT JOIN liked_tracks lt ON lt.track_id = t.id
+        WHERE t.album_id = ? ORDER BY t.disc_number, t.track_number`, id),
+    };
+  },
+
   '/api/tracks': () => query(`
-    SELECT t.id, t.name, t.duration_ms, t.popularity, lt.added_at,
-           al.name AS album, al.image_url, al.release_date,
+    SELECT t.id, t.name, t.duration_ms, t.popularity, lt.added_at, lt.removed_at,
+           al.name AS album, al.id AS album_id, al.image_url, al.release_date,
            (SELECT group_concat(a.name, ', ' ORDER BY ta.position)
               FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
              WHERE ta.track_id = t.id) AS artists
@@ -66,26 +113,28 @@ const api: Record<string, (params: URLSearchParams) => unknown> = {
 
   '/api/albums': () => query(`
     SELECT al.id, al.name, al.album_type, al.release_date, al.label, al.popularity,
-           al.image_url, al.saved_at, al.total_tracks,
+           al.image_url, al.saved_at, al.total_tracks, al.is_saved, al.unsaved_at, al.removed_at,
            (SELECT group_concat(a.name, ', ' ORDER BY aa.position)
               FROM album_artists aa JOIN artists a ON a.id = aa.artist_id
              WHERE aa.album_id = al.id) AS artists
-    FROM albums al WHERE al.is_saved = 1 ORDER BY al.saved_at DESC`),
+    FROM albums al WHERE al.is_saved = 1 OR al.unsaved_at IS NOT NULL
+    ORDER BY al.saved_at DESC`),
 
   '/api/playlists': () => query(`
-    SELECT p.id, p.name, p.description, p.owner_name, p.total_tracks,
-           (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) AS synced_tracks
-    FROM playlists p ORDER BY p.name`),
+    SELECT p.id, p.name, p.description, p.owner_name, p.total_tracks, p.removed_at,
+           (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id AND pt.removed_at IS NULL) AS synced_tracks
+    FROM playlists p ORDER BY p.removed_at IS NOT NULL, p.name`),
 
   '/api/playlist-tracks': (params) => query(`
-    SELECT pt.position, pt.added_at, t.id, t.name, t.duration_ms,
-           al.name AS album, al.image_url,
+    SELECT pt.position, pt.added_at, pt.removed_at, t.id, t.name, t.duration_ms,
+           al.name AS album, al.id AS album_id, al.image_url,
            (SELECT group_concat(a.name, ', ' ORDER BY ta.position)
               FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
              WHERE ta.track_id = t.id) AS artists
     FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id
     LEFT JOIN albums al ON al.id = t.album_id
-    WHERE pt.playlist_id = ? ORDER BY pt.position`, params.get('id') ?? ''),
+    WHERE pt.playlist_id = ?
+    ORDER BY pt.removed_at IS NOT NULL, pt.position`, params.get('id') ?? ''),
 
   '/api/top-artists': (params) => query(`
     SELECT ta.rank, a.id, a.name, a.genres, a.image_url, a.is_followed
@@ -102,7 +151,7 @@ const api: Record<string, (params: URLSearchParams) => unknown> = {
     WHERE tt.time_range = ? ORDER BY tt.rank LIMIT 100`, params.get('range') ?? 'medium_term'),
 
   '/api/plays': () => query(`
-    SELECT p.played_at, p.context_type, t.id, t.name, al.image_url,
+    SELECT p.played_at, p.context_type, t.id, t.name, al.image_url, al.id AS album_id,
            (SELECT group_concat(a.name, ', ' ORDER BY ta.position)
               FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
              WHERE ta.track_id = t.id) AS artists
@@ -123,6 +172,18 @@ const server = http.createServer((req, res) => {
     if (url.pathname === '/' || url.pathname === '/index.html') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       res.end(readFileSync(INDEX));
+      return;
+    }
+    // Locally archived cover art (survives content being pulled from Spotify).
+    const image = url.pathname.match(/^\/img\/(albums|artists)\/([A-Za-z0-9]+)\.jpg$/);
+    if (image) {
+      try {
+        const body = readFileSync(path.join(path.dirname(DB_FILE), 'images', image[1], `${image[2]}.jpg`));
+        res.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'public, max-age=86400' });
+        res.end(body);
+      } catch {
+        res.writeHead(404).end();
+      }
       return;
     }
     res.writeHead(404, { 'content-type': 'text/plain' });

@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS track_artists (
 
 CREATE TABLE IF NOT EXISTS liked_tracks (
   track_id TEXT PRIMARY KEY REFERENCES tracks(id),
-  added_at TEXT NOT NULL
+  added_at TEXT NOT NULL,
+  removed_at TEXT              -- set when un-liked; row is never deleted
 );
 
 CREATE TABLE IF NOT EXISTS playlists (
@@ -79,7 +80,8 @@ CREATE TABLE IF NOT EXISTS playlist_tracks (
   position INTEGER NOT NULL,
   added_at TEXT,
   added_by TEXT,
-  PRIMARY KEY (playlist_id, position)
+  removed_at TEXT,             -- set when gone from the playlist; never deleted
+  PRIMARY KEY (playlist_id, track_id, position)
 );
 
 CREATE TABLE IF NOT EXISTS top_artists (
@@ -187,6 +189,14 @@ export class TasteDb {
     for (const ddl of [
       `ALTER TABLE artists ADD COLUMN discog_synced_at TEXT`,
       `ALTER TABLE albums ADD COLUMN tracks_synced INTEGER NOT NULL DEFAULT 0`,
+      // Tombstones: nothing is ever deleted, only tagged with when it went away.
+      `ALTER TABLE artists ADD COLUMN unfollowed_at TEXT`,
+      `ALTER TABLE artists ADD COLUMN removed_at TEXT`,
+      `ALTER TABLE albums ADD COLUMN unsaved_at TEXT`,
+      `ALTER TABLE albums ADD COLUMN removed_at TEXT`,
+      `ALTER TABLE liked_tracks ADD COLUMN removed_at TEXT`,
+      `ALTER TABLE playlists ADD COLUMN removed_at TEXT`,
+      `ALTER TABLE playlist_tracks ADD COLUMN removed_at TEXT`,
     ]) {
       try {
         this.db.exec(ddl);
@@ -194,6 +204,45 @@ export class TasteDb {
         // column already exists
       }
     }
+    // playlist_tracks PK widened from (playlist_id, position) to
+    // (playlist_id, track_id, position) so a track shifting position leaves
+    // its tombstone row intact. SQLite can't alter a PK — rebuild once.
+    const pk = this.db.prepare(`SELECT COUNT(*) AS n FROM pragma_table_info('playlist_tracks') WHERE pk > 0`).get() as { n: number };
+    if (pk.n === 2) {
+      this.db.exec(`
+        BEGIN;
+        CREATE TABLE playlist_tracks_new (
+          playlist_id TEXT NOT NULL REFERENCES playlists(id),
+          track_id TEXT NOT NULL REFERENCES tracks(id),
+          position INTEGER NOT NULL,
+          added_at TEXT,
+          added_by TEXT,
+          removed_at TEXT,
+          PRIMARY KEY (playlist_id, track_id, position)
+        );
+        INSERT OR IGNORE INTO playlist_tracks_new SELECT playlist_id, track_id, position, added_at, added_by, removed_at FROM playlist_tracks;
+        DROP TABLE playlist_tracks;
+        ALTER TABLE playlist_tracks_new RENAME TO playlist_tracks;
+        COMMIT;
+      `);
+    }
+  }
+
+  // Tombstone helper for full-set syncs: rows in `table` whose `keyCol` is
+  // not in `presentIds` get `col` stamped; present rows get it cleared (an
+  // item re-liked/re-followed/re-saved comes back to life, keeping history
+  // simple: the current state plus when it last went away).
+  markMissing(table: string, keyCol: string, col: string, presentIds: string[], extraWhere = '1=1'): number {
+    this.db.exec(`CREATE TEMP TABLE IF NOT EXISTS present_ids (id TEXT PRIMARY KEY)`);
+    this.db.exec(`DELETE FROM present_ids`);
+    const ins = this.db.prepare(`INSERT OR IGNORE INTO present_ids (id) VALUES (?)`);
+    for (const id of presentIds) ins.run(id);
+    const res = this.db.prepare(`
+      UPDATE ${table} SET ${col} = ?
+      WHERE ${col} IS NULL AND ${extraWhere} AND ${keyCol} NOT IN (SELECT id FROM present_ids)`
+    ).run(new Date().toISOString());
+    this.db.prepare(`UPDATE ${table} SET ${col} = NULL WHERE ${keyCol} IN (SELECT id FROM present_ids)`).run();
+    return Number(res.changes);
   }
 
   private prepare(sql: string): StatementSync {

@@ -5,6 +5,11 @@ liked songs, saved albums (with full track listings), followed artists, playlist
 top artists/tracks per time range, and recently played. Artists are hydrated with
 genres and follower counts; albums with label, popularity and track listings.
 
+**Nothing is ever deleted.** Un-liking, un-following, un-saving, removing from a
+playlist, or Spotify pulling content entirely only *tags* the row
+(`removed_at` / `unfollowed_at` / `unsaved_at`) — the history stays queryable
+and visible in the UI as badges.
+
 It also archives, so the data survives content being pulled from Spotify:
 
 - **Full discographies** — every album/single/compilation per known artist
@@ -77,9 +82,13 @@ SELECT substr(added_at, 1, 7) AS month, COUNT(*) FROM liked_tracks GROUP BY mont
 `src/server.ts` + `public/index.html`: a read-only browser over the DB —
 overview stats (genres, liked-per-month), artist grid with search, liked
 songs, saved albums, playlists, top artists/tracks per time range, recent
-plays. Zero deps, same as the exporter. Locally: `node src/server.ts` →
-<http://localhost:8080>. On the homelab: **<https://music.home.arpa>**
-(Caddy → `spotify-taste-db-web:8080` over `homelab-net`).
+plays. Navigation is internal: artist → discography → album detail with
+track list; Spotify appears only as explicit "Open in Spotify ↗" links.
+Cover art is served from the local archive first (`/img/...`), falling back
+to the CDN — removed content keeps its artwork. Zero deps, same as the
+exporter. Locally: `node src/server.ts` → <http://localhost:8080>. On the
+homelab: **<https://music.home.arpa>** (Caddy → `spotify-taste-db-web:8080`
+over `homelab-net`).
 
 ## Deployment (pi-server)
 

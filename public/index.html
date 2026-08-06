@@ -9,13 +9,13 @@
     color-scheme: light dark;
     --surface: #fcfcfb; --card: #f0efec; --line: #dddcd6;
     --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #8a887f;
-    --accent: #2a78d6; --accent-soft: #cde2fb;
+    --accent: #2a78d6; --accent-soft: #cde2fb; --bad: #d03b3b;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --surface: #1a1a19; --card: #262624; --line: #383835;
       --ink: #ffffff; --ink-2: #c3c2b7; --ink-3: #8a887f;
-      --accent: #3987e5; --accent-soft: #104281;
+      --accent: #3987e5; --accent-soft: #104281; --bad: #e66767;
     }
   }
   * { box-sizing: border-box; margin: 0; }
@@ -26,6 +26,7 @@
   }
   header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; }
   h1 { font-size: 1.3rem; }
+  h1 a { color: inherit; text-decoration: none; }
   #sync { color: var(--ink-3); font-size: .8rem; }
   nav { display: flex; gap: .3rem; flex-wrap: wrap; margin-bottom: 1.4rem; }
   nav button {
@@ -45,23 +46,29 @@
   .tile span { color: var(--ink-2); font-size: .78rem; }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 1rem; }
   .card { background: var(--card); border-radius: 12px; padding: 1rem 1.1rem; }
-  .card h2 { font-size: .95rem; margin-bottom: .8rem; }
+  .card h2, main h2 { font-size: .95rem; margin-bottom: .8rem; }
+  main h2 { margin-top: 1.6rem; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: .9rem; }
   .cell { background: var(--card); border-radius: 10px; padding: .6rem; }
-  .cell img, .cell .ph { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; }
-  .ph { display: flex; align-items: center; justify-content: center; background: var(--accent-soft);
-        color: var(--accent); font-size: 2rem; font-weight: 700; }
+  .pic { position: relative; width: 100%; aspect-ratio: 1; }
+  .pic img { width: 100%; height: 100%; object-fit: cover; border-radius: 8px; display: block; }
+  .pic .ph { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+             background: var(--accent-soft); color: var(--accent); font-size: 2rem; font-weight: 700;
+             border-radius: 8px; }
   .cell .nm { font-size: .85rem; font-weight: 600; margin-top: .4rem;
               overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .cell .sub { font-size: .74rem; color: var(--ink-2);
+  .cell .sub, .sub { font-size: .74rem; color: var(--ink-2);
                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .chips { display: flex; gap: .25rem; flex-wrap: wrap; margin-top: .3rem; }
   .chip { font-size: .66rem; color: var(--ink-2); border: 1px solid var(--line);
-          border-radius: 999px; padding: .05rem .45rem; }
+          border-radius: 999px; padding: .05rem .45rem; white-space: nowrap; }
+  .chip.bad { color: var(--bad); border-color: var(--bad); }
   .rows { display: flex; flex-direction: column; }
   .row { display: flex; gap: .8rem; align-items: center; padding: .45rem .3rem;
          border-bottom: 1px solid var(--line); }
-  .row img, .row .ph { width: 38px; height: 38px; flex: none; border-radius: 6px; font-size: 1rem; }
+  .row.gone { opacity: .55; }
+  .row .pic { width: 38px; height: 38px; flex: none; aspect-ratio: auto; }
+  .row .pic .ph { font-size: 1rem; }
   .row .mid { flex: 1; min-width: 0; }
   .row .mid div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .row .mid .sub { color: var(--ink-2); font-size: .8rem; }
@@ -69,7 +76,15 @@
               font-variant-numeric: tabular-nums; }
   .rank { color: var(--ink-3); font-variant-numeric: tabular-nums; width: 2em; flex: none; text-align: right; }
   a { color: inherit; text-decoration: none; }
-  a:hover .nm, .row a:hover { text-decoration: underline; }
+  a:hover { text-decoration: underline; }
+  a.ext { color: var(--ink-3); font-size: .8rem; flex: none; padding: 0 .2rem; }
+  .spbtn { display: inline-block; background: none; border: 1px solid var(--line); color: var(--ink-2);
+           border-radius: 999px; padding: .3rem .9rem; font-size: .8rem; margin-top: .5rem; }
+  .spbtn:hover { border-color: var(--accent); color: var(--accent); text-decoration: none; }
+  .hero { display: flex; gap: 1.2rem; align-items: flex-start; margin-bottom: 1rem; flex-wrap: wrap; }
+  .hero .pic { width: clamp(120px, 22vw, 180px); flex: none; }
+  .hero h1 { font-size: 1.5rem; margin-bottom: .2rem; }
+  .hero .meta { color: var(--ink-2); font-size: .85rem; margin-top: .15rem; }
   .bars { display: grid; grid-template-columns: minmax(90px, max-content) 1fr max-content;
           gap: .3rem .6rem; align-items: center; }
   .bars .lbl { font-size: .8rem; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis;
@@ -81,14 +96,16 @@
          font-size: .75rem; padding: .25rem .55rem; border-radius: 6px; opacity: 0;
          transition: opacity .08s; z-index: 10; white-space: nowrap; }
   .empty { color: var(--ink-3); padding: 2rem 0; text-align: center; }
-  .seg { display: flex; gap: .3rem; }
+  .note { color: var(--ink-3); font-size: .8rem; margin: .4rem 0 1rem; }
+  .seg { display: flex; gap: .3rem; flex-wrap: wrap; }
   .seg button { border: 1px solid var(--line); background: none; color: var(--ink-2);
                 padding: .25rem .7rem; border-radius: 8px; cursor: pointer; font: inherit; font-size: .8rem; }
   .seg button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .heart { color: var(--accent); flex: none; width: 1.1em; text-align: center; }
 </style>
 </head>
 <body>
-<header><h1>🎧 taste-db</h1><div id="sync"></div></header>
+<header><h1><a href="#overview">🎧 taste-db</a></h1><div id="sync"></div></header>
 <nav id="nav"></nav>
 <main id="main"><div class="empty">loading…</div></main>
 <div id="tip"></div>
@@ -104,12 +121,31 @@ const ago = (iso) => {
   if (m < 1440) return `${Math.round(m / 60)}h ago`;
   return `${Math.round(m / 1440)}d ago`;
 };
-const img = (url, name, cls = '') => url
-  ? `<img class="${cls}" src="${esc(url)}" alt="" loading="lazy">`
-  : `<div class="ph ${cls}">${esc((name ?? '?')[0].toUpperCase())}</div>`;
-const link = (type, id, inner) => id ? `<a href="https://open.spotify.com/${type}/${id}" target="_blank" rel="noopener">${inner}</a>` : inner;
+// Local archive first (survives Spotify deletions), CDN fallback, then initial.
+function imgErr(el) {
+  const cdn = el.dataset.cdn;
+  if (cdn) { el.removeAttribute('data-cdn'); el.src = cdn; return; }
+  el.style.display = 'none';
+  el.nextElementSibling.style.display = 'flex';
+}
+const pic = (kind, id, cdnUrl, name) => `
+  <div class="pic">
+    <img src="${id ? `/img/${kind}/${esc(id)}.jpg` : ''}" alt="" loading="lazy"
+         data-cdn="${esc(cdnUrl ?? '')}" onerror="imgErr(this)">
+    <div class="ph" style="display:none">${esc((name ?? '?')[0].toUpperCase())}</div>
+  </div>`;
+const spotify = (type, id) => `<a class="ext" href="https://open.spotify.com/${type}/${id}" target="_blank" rel="noopener" title="open in Spotify">↗</a>`;
+const spbtn = (type, id) => `<a class="spbtn" href="https://open.spotify.com/${type}/${id}" target="_blank" rel="noopener">Open in Spotify ↗</a>`;
 const genres = (json, n = 3) => { try { return JSON.parse(json ?? '[]').slice(0, n); } catch { return []; } };
-const chips = (json) => { const g = genres(json); return g.length ? `<div class="chips">${g.map((x) => `<span class="chip">${esc(x)}</span>`).join('')}</div>` : ''; };
+const chips = (list) => list.length ? `<div class="chips">${list.join('')}</div>` : '';
+const chip = (text, bad = false) => `<span class="chip${bad ? ' bad' : ''}">${esc(text)}</span>`;
+const gchips = (json, n = 3) => chips(genres(json, n).map((g) => chip(g)));
+// Tombstone badges — history is kept, these say what changed and when.
+const badges = (row) => chips([
+  row.removed_at ? chip(`removed from spotify ${day(row.removed_at)}`, true) : '',
+  row.unfollowed_at && !row.is_followed ? chip(`unfollowed ${day(row.unfollowed_at)}`) : '',
+  row.unsaved_at && !row.is_saved ? chip(`unsaved ${day(row.unsaved_at)}`) : '',
+].filter(Boolean));
 
 const cache = {};
 async function api(p) { return cache[p] ??= await (await fetch(p)).json(); }
@@ -136,20 +172,35 @@ function monthChart(data) {
     const label = d === peak ? `<text x="${x + bw / 2}" y="${H - h - 26}" text-anchor="middle">${d.n}</text>` : '';
     return `<g data-tip="${esc(d.month)} · ${d.n} liked">${label}<rect x="${x}" y="${H - h - 20}" width="${bw}" height="${h}" rx="2" fill="var(--accent)"/></g>`;
   }).join('');
-  const first = data[0].month, last = data[data.length - 1].month;
   return `<svg viewBox="0 0 ${W} ${H}" style="width:100%">${bars}
-    <text x="${pad}" y="${H - 6}">${esc(first)}</text>
-    <text x="${W - pad}" y="${H - 6}" text-anchor="end">${esc(last)}</text></svg>`;
+    <text x="${pad}" y="${H - 6}">${esc(data[0].month)}</text>
+    <text x="${W - pad}" y="${H - 6}" text-anchor="end">${esc(data[data.length - 1].month)}</text></svg>`;
 }
 
-const trackRow = (t, endText, rank) => `
-  <div class="row">${rank != null ? `<span class="rank">${rank}</span>` : ''}
-    ${img(t.image_url, t.name)}
+// Track row: internal album link, explicit ↗ for Spotify. `gone` greys +
+// badges rows that were un-liked / removed from a playlist.
+const trackRow = (t, endText, rank) => {
+  const gone = t.removed_at;
+  const albumHref = t.album_id ? `#album/${t.album_id}` : null;
+  return `
+  <div class="row${gone ? ' gone' : ''}">${rank != null ? `<span class="rank">${rank}</span>` : ''}
+    ${albumHref ? `<a href="${albumHref}">` : ''}${pic('albums', t.album_id, t.image_url, t.album ?? t.name)}${albumHref ? '</a>' : ''}
     <div class="mid">
-      <div>${link('track', t.id, esc(t.name))}</div>
-      <div class="sub">${esc(t.artists ?? '')}${t.album ? ' · ' + esc(t.album) : ''}</div>
+      <div>${esc(t.name)} ${gone ? chip(`removed ${day(gone)}`, true) : ''}</div>
+      <div class="sub">${esc(t.artists ?? '')}${t.album ? ` · <a href="${albumHref ?? '#'}">${esc(t.album)}</a>` : ''}</div>
     </div>
     <div class="end">${endText}</div>
+    ${spotify('track', t.id)}
+  </div>`;
+};
+
+const albumCell = (a) => `
+  <div class="cell">
+    <a href="#album/${a.id}">${pic('albums', a.id, a.image_url, a.name)}
+      <div class="nm">${esc(a.name)}</div></a>
+    <div class="sub">${esc(a.artists ?? '')}</div>
+    <div class="sub">${(a.release_date ?? '').slice(0, 4)}${a.album_group && a.album_group !== 'album' ? ' · ' + esc(a.album_group) : ''}${a.is_saved ? ' · saved ✓' : ''}</div>
+    ${badges(a)}
   </div>`;
 
 const views = {
@@ -182,25 +233,23 @@ const views = {
 
   async liked() {
     const all = await api('/api/tracks');
-    return `<div class="tools"><input type="search" id="q" placeholder="search ${all.length} liked songs…"></div>
+    const goneN = all.filter((t) => t.removed_at).length;
+    return `<div class="tools"><input type="search" id="q" placeholder="search ${all.length} liked songs…">
+      <label class="chk"><input type="checkbox" id="gone"> show un-liked (${goneN})</label></div>
       <div class="rows" id="out"></div>`;
   },
 
   async albums() {
     const all = await api('/api/albums');
     if (!all.length) return '<div class="empty">no saved albums synced yet</div>';
-    return `<div class="grid">${all.map((a) => `
-      <div class="cell">${link('album', a.id, img(a.image_url, a.name) + `<div class="nm">${esc(a.name)}</div>`)}
-        <div class="sub">${esc(a.artists ?? '')}</div>
-        <div class="sub">${(a.release_date ?? '').slice(0, 4)}${a.label ? ' · ' + esc(a.label) : ''}</div>
-      </div>`).join('')}</div>`;
+    return `<div class="grid">${all.map(albumCell).join('')}</div>`;
   },
 
   async playlists() {
     const pls = await api('/api/playlists');
     if (!pls.length) return '<div class="empty">no playlists synced yet</div>';
     return `<div class="tools"><div class="seg" id="plseg">${pls.map((p, i) =>
-        `<button data-id="${p.id}" class="${i === 0 ? 'on' : ''}">${esc(p.name)} <span style="opacity:.6">${p.synced_tracks}</span></button>`).join('')}</div></div>
+        `<button data-id="${p.id}" class="${i === 0 ? 'on' : ''}">${esc(p.name)}${p.removed_at ? ' †' : ''} <span style="opacity:.6">${p.synced_tracks}</span></button>`).join('')}</div></div>
       <div class="rows" id="out"><div class="empty">loading…</div></div>`;
   },
 
@@ -220,6 +269,75 @@ const views = {
     if (!all.length) return '<div class="empty">no plays captured yet</div>';
     return `<div class="rows">${all.map((p) => trackRow(p, ago(p.played_at))).join('')}</div>`;
   },
+
+  async artist(id) {
+    const d = await api(`/api/artist?id=${id}`);
+    if (!d.artist) return '<div class="empty">unknown artist</div>';
+    const a = d.artist;
+    const ranks = { short_term: '4w', medium_term: '6mo', long_term: 'yrs' };
+    const meta = [
+      a.followers ? `${Number(a.followers).toLocaleString()} followers` : '',
+      a.popularity != null ? `popularity ${a.popularity}` : '',
+      d.liked.filter((t) => !t.removed_at).length ? `${d.liked.filter((t) => !t.removed_at).length} liked tracks` : '',
+      ...d.topRanks.map((r) => `#${r.rank} (${ranks[r.time_range] ?? r.time_range})`),
+    ].filter(Boolean).join(' · ');
+    const groups = [['album', 'Albums'], ['single', 'Singles & EPs'], ['compilation', 'Compilations']];
+    const discog = groups.map(([g, title]) => {
+      const rows = d.albums.filter((al) => (al.album_group ?? 'album') === g);
+      return rows.length ? `<h2>${title} (${rows.length})</h2><div class="grid">${rows.map(albumCell).join('')}</div>` : '';
+    }).join('');
+    return `<div class="hero">
+        ${pic('artists', a.id, a.image_url, a.name)}
+        <div>
+          <h1>${a.is_followed ? '★ ' : ''}${esc(a.name)}</h1>
+          ${badges(a)}
+          ${gchips(a.genres, 8)}
+          <div class="meta">${meta}</div>
+          ${spbtn('artist', a.id)}
+        </div>
+      </div>
+      ${a.discog_synced_at ? '' : '<div class="note">full discography not crawled yet — showing what the library knows so far</div>'}
+      ${discog || '<div class="empty">no albums known yet</div>'}
+      ${d.liked.length ? `<h2>Liked tracks</h2><div class="rows">${d.liked.map((t) => trackRow(t, day(t.added_at))).join('')}</div>` : ''}`;
+  },
+
+  async album(id) {
+    const d = await api(`/api/album?id=${id}`);
+    if (!d.album) return '<div class="empty">unknown album</div>';
+    const al = d.album;
+    const artistLinks = d.artists.map((x) => `<a href="#artist/${x.id}"><b>${esc(x.name)}</b></a>`).join(', ');
+    const meta = [
+      (al.release_date ?? '').slice(0, 10), al.album_type,
+      al.total_tracks ? `${al.total_tracks} tracks` : '',
+      al.label || '', al.popularity != null ? `popularity ${al.popularity}` : '',
+      al.is_saved ? `saved ${day(al.saved_at)} ✓` : '',
+    ].filter(Boolean).join(' · ');
+    const discs = [...new Set(d.tracks.map((t) => t.disc_number ?? 1))].sort();
+    const list = discs.map((disc) => {
+      const rows = d.tracks.filter((t) => (t.disc_number ?? 1) === disc).map((t) => `
+        <div class="row">
+          <span class="rank">${t.track_number ?? ''}</span>
+          <span class="heart">${t.liked ? '♥' : ''}</span>
+          <div class="mid"><div>${esc(t.name)}</div>
+            <div class="sub">${esc(t.artists ?? '')}</div></div>
+          <div class="end">${dur(t.duration_ms)}</div>
+          ${spotify('track', t.id)}
+        </div>`).join('');
+      return (discs.length > 1 ? `<h2>Disc ${disc}</h2>` : '') + `<div class="rows">${rows}</div>`;
+    }).join('');
+    return `<div class="hero">
+        ${pic('albums', al.id, al.image_url, al.name)}
+        <div>
+          <h1>${esc(al.name)}</h1>
+          <div class="meta">${artistLinks}</div>
+          <div class="meta">${meta}</div>
+          ${badges(al)}
+          ${spbtn('album', al.id)}
+        </div>
+      </div>
+      <h2>Tracks${d.tracks.length ? ` (${d.tracks.length} in library)` : ''}</h2>
+      ${d.tracks.length ? list : '<div class="empty">track listing not hydrated yet — next sync runs will fill it in</div>'}`;
+  },
 };
 
 const after = {
@@ -232,9 +350,12 @@ const after = {
           (!fol.checked || a.is_followed) &&
           (!needle || a.name.toLowerCase().includes(needle) || (a.genres ?? '').toLowerCase().includes(needle)));
         out.innerHTML = rows.slice(0, 400).map((a) => `
-          <div class="cell">${link('artist', a.id, img(a.image_url, a.name) + `<div class="nm">${a.is_followed ? '★ ' : ''}${esc(a.name)}</div>`)}
+          <div class="cell">
+            <a href="#artist/${a.id}">${pic('artists', a.id, a.image_url, a.name)}
+              <div class="nm">${a.is_followed ? '★ ' : ''}${esc(a.name)}</div></a>
             <div class="sub">${a.liked_count ? a.liked_count + ' liked' : ''}${a.top_rank ? (a.liked_count ? ' · ' : '') + '#' + a.top_rank : ''}</div>
-            ${chips(a.genres)}
+            ${badges(a)}
+            ${gchips(a.genres)}
           </div>`).join('') || '<div class="empty">no matches</div>';
       };
       q.addEventListener('input', draw); fol.addEventListener('change', draw); draw();
@@ -242,15 +363,15 @@ const after = {
   },
   liked(el) {
     api('/api/tracks').then((all) => {
-      const out = $('#out', el), q = $('#q', el);
+      const out = $('#out', el), q = $('#q', el), gone = $('#gone', el);
       const draw = () => {
         const needle = q.value.toLowerCase();
-        const rows = all.filter((t) => !needle ||
-          `${t.name} ${t.artists} ${t.album}`.toLowerCase().includes(needle));
+        const rows = all.filter((t) => (gone.checked || !t.removed_at) &&
+          (!needle || `${t.name} ${t.artists} ${t.album}`.toLowerCase().includes(needle)));
         out.innerHTML = rows.slice(0, 500).map((t) => trackRow(t, `${day(t.added_at)}<br>${dur(t.duration_ms)}`)).join('')
           || '<div class="empty">no matches</div>';
       };
-      q.addEventListener('input', draw); draw();
+      q.addEventListener('input', draw); gone.addEventListener('change', draw); draw();
     });
   },
   playlists(el) {
@@ -271,9 +392,11 @@ const after = {
     const load = (range) => {
       api(`/api/top-artists?range=${range}`).then((rows) => {
         $('#ta', el).innerHTML = rows.slice(0, 50).map((a) => `
-          <div class="row"><span class="rank">${a.rank}</span>${img(a.image_url, a.name)}
-            <div class="mid"><div>${link('artist', a.id, esc(a.name))}</div>
-            <div class="sub">${genres(a.genres, 2).join(', ')}</div></div></div>`).join('')
+          <div class="row"><span class="rank">${a.rank}</span>
+            <a href="#artist/${a.id}">${pic('artists', a.id, a.image_url, a.name)}</a>
+            <div class="mid"><div><a href="#artist/${a.id}">${esc(a.name)}</a></div>
+            <div class="sub">${genres(a.genres, 2).join(', ')}</div></div>
+            ${spotify('artist', a.id)}</div>`).join('')
           || '<div class="empty">not synced yet</div>';
       });
       api(`/api/top-tracks?range=${range}`).then((rows) => {
@@ -296,12 +419,19 @@ nav.innerHTML = Object.entries(TABS).map(([k, v]) => `<button data-t="${k}">${v}
 nav.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) location.hash = b.dataset.t; });
 
 async function show() {
-  const tab = TABS[location.hash.slice(1)] ? location.hash.slice(1) : 'overview';
+  const hash = location.hash.slice(1);
+  const detail = hash.match(/^(artist|album)\/([A-Za-z0-9]+)$/);
+  const tab = detail ? null : (TABS[hash] ? hash : 'overview');
   nav.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.t === tab));
   const main = $('#main');
   try {
-    main.innerHTML = await views[tab]();
-    after[tab]?.(main);
+    if (detail) {
+      main.innerHTML = await views[detail[1]](detail[2]);
+    } else {
+      main.innerHTML = await views[tab]();
+      after[tab]?.(main);
+    }
+    scrollTo(0, 0);
     main.querySelectorAll('[data-tip]').forEach((el) => tipOn(el, el.dataset.tip));
   } catch (err) {
     main.innerHTML = `<div class="empty">${esc(err.message)} — is the database there yet?</div>`;
