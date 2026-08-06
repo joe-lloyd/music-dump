@@ -66,10 +66,12 @@ SELECT substr(added_at, 1, 7) AS month, COUNT(*) FROM liked_tracks GROUP BY mont
 
 ## Deployment (pi-server)
 
-Runs on `pi-server` (192.168.2.23) from `~/spotify-taste-db` via cron
-(`20 */6 * * *`), inside a throwaway `node:24-alpine` container (system Node
-there is v18). Logs append to `export.log`; the DB lives at `data/spotify.db`
-on the Pi. Grab a copy for local querying with:
+Runs on `pi-server` (192.168.2.23) as the `spotify-taste-db` container — see
+`docker-compose.yml` (persistent `node:24-alpine` with an internal 6h sync
+loop, so it's visible in Portainer/Beszel like the other services; system
+Node on the Pi is v18). Deployed at `pi:~/spotify-taste-db`; logs via
+`docker logs spotify-taste-db`; the DB lives at `data/spotify.db` on the Pi.
+Grab a copy for local querying with:
 
 ```sh
 scp pi:spotify-taste-db/data/spotify.db /tmp/spotify.db

@@ -1,0 +1,29 @@
+# Persistent container with an internal sync loop, instead of host cron
+# spawning throwaway containers: a long-lived container shows up in
+# Portainer/Beszel/docker stats alongside the other pi-server services,
+# ephemeral ones don't.
+#
+# Stock node:24-alpine with the project mounted at /app — the script has zero
+# runtime dependencies (built-in fetch + node:sqlite), so there is nothing to
+# install and no image to build. System Node on the Pi is v18; the script
+# needs >=23.6.
+#
+# The interval is hardcoded in the command (compose would interpolate
+# ${VAR} syntax at parse time): 6h, chosen so the 50-item recently-played
+# API window doesn't roll over unseen. A quota-exhausted run exits 0 almost
+# immediately and the loop just sleeps until the next attempt.
+services:
+  exporter:
+    image: node:24-alpine
+    container_name: spotify-taste-db
+    working_dir: /app
+    command: ["sh", "-c", "while true; do node --disable-warning=ExperimentalWarning src/main.ts; echo \"--- sleeping 6h ($$(date))\"; sleep 21600; done"]
+    restart: unless-stopped
+    init: true
+    volumes:
+      - .:/app
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
