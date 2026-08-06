@@ -4,6 +4,14 @@ const API = 'https://api.spotify.com/v1';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+  }
+}
+
 export async function get<T>(pathOrUrl: string, params?: Record<string, string>): Promise<T> {
   const url = new URL(pathOrUrl.startsWith('http') ? pathOrUrl : API + pathOrUrl);
   for (const [key, value] of Object.entries(params ?? {})) {
@@ -25,7 +33,7 @@ export async function get<T>(pathOrUrl: string, params?: Record<string, string>)
       continue;
     }
     if (!res.ok) {
-      throw new Error(`GET ${url.pathname}${url.search} failed (${res.status}): ${await res.text()}`);
+      throw new ApiError(`GET ${url.pathname}${url.search} failed (${res.status}): ${await res.text()}`, res.status);
     }
     return (await res.json()) as T;
   }

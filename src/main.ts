@@ -6,11 +6,15 @@ try {
 } catch {
   // no .env — rely on the environment
 }
-import { get, paginate, type Page } from './api.ts';
+import { ApiError, get, paginate, type Page } from './api.ts';
 import { TasteDb, type ApiAlbum, type ApiArtist, type ApiTrack } from './db.ts';
 
 const DB_FILE = process.env.SPOTIFY_DB ?? path.join(import.meta.dirname, '..', 'data', 'spotify.db');
 const TIME_RANGES = ['short_term', 'medium_term', 'long_term'] as const;
+// Spotify pages the top-items ranking thousands deep; past a few hundred it is
+// noise and crawl time. 0 = unlimited.
+const TOP_LIMIT = Number(process.env.SPOTIFY_TOP_LIMIT ?? 500);
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 interface SavedTrackItem { added_at: string; track: ApiTrack }
 interface SavedAlbumItem { added_at: string; album: ApiAlbum & { tracks?: Page<ApiTrack> } }
@@ -28,7 +32,8 @@ interface PlaylistTrackItem {
   added_at?: string;
   added_by?: { id?: string };
   is_local?: boolean;
-  track: ApiTrack | null;
+  track?: ApiTrack | null; // legacy shape
+  item?: ApiTrack | null; // dev-mode shape since 2026
 }
 interface PlayItem {
   played_at: string;
@@ -112,13 +117,20 @@ async function syncPlaylists(db: TasteDb): Promise<{ playlists: number; tracks: 
         pl.public, pl.collaborative, pl.snapshot_id, pl.tracks?.total,
       );
       db.run('DELETE FROM playlist_tracks WHERE playlist_id = ?', pl.id);
+      // Dev-mode apps get 403 on /playlists/{id}/tracks, but the playlist
+      // detail endpoint embeds the track pages: under `items` (new shape,
+      // entries carry `item`) or `tracks` (legacy shape, entries carry `track`).
+      const detail = await get<{ items?: Page<PlaylistTrackItem>; tracks?: Page<PlaylistTrackItem> }>(`/playlists/${pl.id}`);
+      let trackPage: Page<PlaylistTrackItem> | undefined = detail.items ?? detail.tracks;
+      db.run('UPDATE playlists SET total_tracks = ? WHERE id = ?', trackPage?.total ?? null, pl.id);
       let position = 0;
-      for await (const trackPage of paginate<PlaylistTrackItem>(`/playlists/${pl.id}/tracks`)) {
+      while (trackPage) {
+        const entries = trackPage.items ?? [];
         db.transaction(() => {
-          for (const item of trackPage.items) {
+          for (const entry of entries) {
             position++;
-            const track = item.track;
-            if (!track?.id || track.type === 'episode' || track.is_local) {
+            const track = entry.item ?? entry.track;
+            if (!track?.id || track.type === 'episode' || track.episode || track.is_local || entry.is_local) {
               skipped++;
               continue;
             }
@@ -126,11 +138,21 @@ async function syncPlaylists(db: TasteDb): Promise<{ playlists: number; tracks: 
             db.run(
               `INSERT OR REPLACE INTO playlist_tracks (playlist_id, track_id, position, added_at, added_by)
                VALUES (?, ?, ?, ?, ?)`,
-              pl.id, track.id, position, item.added_at, item.added_by?.id,
+              pl.id, track.id, position, entry.added_at, entry.added_by?.id,
             );
             tracks++;
           }
         });
+        if (!trackPage.next) break;
+        try {
+          trackPage = await get<Page<PlaylistTrackItem>>(trackPage.next);
+        } catch (err) {
+          if (err instanceof ApiError && (err.status === 403 || err.status === 404)) {
+            console.log(`  "${pl.name}": pagination blocked (${err.status}), truncated at ${position} of ${detail.items?.total ?? '?'} items`);
+            break;
+          }
+          throw err;
+        }
       }
       playlists++;
       console.log(`  ${playlists}/${page.total ?? '?'}: ${pl.name} (${position} items)`);
@@ -152,6 +174,7 @@ async function syncTops(db: TasteDb): Promise<void> {
           db.run('INSERT OR REPLACE INTO top_artists (time_range, rank, artist_id) VALUES (?, ?, ?)', range, ++rank, artist.id);
         }
       });
+      if (TOP_LIMIT && rank >= TOP_LIMIT) break;
     }
     db.run('DELETE FROM top_tracks WHERE time_range = ?', range);
     rank = 0;
@@ -163,6 +186,7 @@ async function syncTops(db: TasteDb): Promise<void> {
           db.run('INSERT OR REPLACE INTO top_tracks (time_range, rank, track_id) VALUES (?, ?, ?)', range, ++rank, track.id);
         }
       });
+      if (TOP_LIMIT && rank >= TOP_LIMIT) break;
     }
   }
 }
@@ -187,35 +211,37 @@ async function syncRecentlyPlayed(db: TasteDb): Promise<number> {
 }
 
 // Simplified artist/album objects embedded in tracks lack genres, followers
-// and label — fetch the full objects in batches to fill those in.
+// and label. Batch ?ids= endpoints return 403 for dev-mode apps, so fetch the
+// full objects one at a time, throttled. NULL markers make this resumable —
+// an interrupted run picks up where it left off.
 async function hydrate(db: TasteDb): Promise<void> {
   const artistIds = (db.db.prepare('SELECT id FROM artists WHERE genres IS NULL').all() as { id: string }[]).map((r) => r.id);
   console.log(`Hydrating ${artistIds.length} artists (genres, followers)...`);
-  for (let i = 0; i < artistIds.length; i += 50) {
-    const batch = artistIds.slice(i, i + 50);
-    const body = await get<{ artists: (ApiArtist | null)[] }>('/artists', { ids: batch.join(',') });
-    db.transaction(() => {
-      for (const artist of body.artists) {
-        if (!artist?.id) continue;
-        db.upsertArtist({ ...artist, genres: artist.genres ?? [] });
-      }
-    });
-    console.log(`  ${Math.min(i + 50, artistIds.length)}/${artistIds.length}`);
+  for (const [i, id] of artistIds.entries()) {
+    try {
+      const artist = await get<ApiArtist>(`/artists/${id}`);
+      db.upsertArtist({ ...artist, genres: artist.genres ?? [] });
+    } catch (err) {
+      if (!(err instanceof ApiError && (err.status === 403 || err.status === 404))) throw err;
+      db.run(`UPDATE artists SET genres = '[]' WHERE id = ?`, id); // unreachable — don't refetch
+    }
+    if ((i + 1) % 100 === 0) console.log(`  ${i + 1}/${artistIds.length}`);
+    await sleep(250);
   }
 
   const albumIds = (db.db.prepare('SELECT id FROM albums WHERE label IS NULL').all() as { id: string }[]).map((r) => r.id);
   console.log(`Hydrating ${albumIds.length} albums (label, popularity)...`);
-  for (let i = 0; i < albumIds.length; i += 20) {
-    const batch = albumIds.slice(i, i + 20);
-    const body = await get<{ albums: (ApiAlbum | null)[] }>('/albums', { ids: batch.join(',') });
-    db.transaction(() => {
-      for (const album of body.albums) {
-        if (!album?.id) continue;
-        // '' instead of NULL for label-less albums, so they aren't refetched every run.
-        db.upsertAlbum({ ...album, label: album.label ?? '' });
-      }
-    });
-    console.log(`  ${Math.min(i + 20, albumIds.length)}/${albumIds.length}`);
+  for (const [i, id] of albumIds.entries()) {
+    try {
+      const album = await get<ApiAlbum>(`/albums/${id}`);
+      // '' instead of NULL for label-less albums, so they aren't refetched every run.
+      db.upsertAlbum({ ...album, label: album.label ?? '' });
+    } catch (err) {
+      if (!(err instanceof ApiError && (err.status === 403 || err.status === 404))) throw err;
+      db.run(`UPDATE albums SET label = '' WHERE id = ?`, id); // unreachable — don't refetch
+    }
+    if ((i + 1) % 100 === 0) console.log(`  ${i + 1}/${albumIds.length}`);
+    await sleep(250);
   }
 }
 

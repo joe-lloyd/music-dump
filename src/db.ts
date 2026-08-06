@@ -152,6 +152,7 @@ export interface ApiTrack {
   id: string | null;
   name: string;
   type?: string;
+  episode?: boolean; // dev-mode playlist shape flags episodes with a boolean
   is_local?: boolean;
   album?: ApiAlbum;
   artists?: ApiArtist[];
