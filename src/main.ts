@@ -1,5 +1,11 @@
 import path from 'node:path';
 import { initAuth } from './auth.ts';
+
+try {
+  process.loadEnvFile(path.join(import.meta.dirname, '..', '.env'));
+} catch {
+  // no .env — rely on the environment
+}
 import { get, paginate, type Page } from './api.ts';
 import { TasteDb, type ApiAlbum, type ApiArtist, type ApiTrack } from './db.ts';
 
