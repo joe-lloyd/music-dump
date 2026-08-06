@@ -1,0 +1,4 @@
+node_modules/
+tokens.json
+data/
+.env
