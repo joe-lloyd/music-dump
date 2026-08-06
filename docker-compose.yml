@@ -20,8 +20,16 @@ services:
     command: ["sh", "-c", "while true; do node --disable-warning=ExperimentalWarning src/main.ts; echo \"--- sleeping 6h ($$(date))\"; sleep 21600; done"]
     restart: unless-stopped
     init: true
+    # homelab-net + token: new-release alerts publish to the ntfy container
+    # (write-only service account "spotify", same pattern as n8n/beszel).
+    networks: [default, homelab-net]
+    environment:
+      NTFY_URL: "http://ntfy:8080"
+      NTFY_TOPIC: "homelab"
+      NTFY_TOKEN_FILE: "/run/secrets/ntfy-token"
     volumes:
       - .:/app
+      - /etc/homelab/spotify-taste-db/ntfy-token:/run/secrets/ntfy-token:ro
     logging:
       driver: json-file
       options:

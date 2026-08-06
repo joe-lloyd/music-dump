@@ -43,6 +43,19 @@ const api: Record<string, (params: URLSearchParams) => unknown> = {
       likedPerMonth: query(`
         SELECT substr(added_at, 1, 7) AS month, COUNT(*) AS n
         FROM liked_tracks GROUP BY month ORDER BY month`),
+      releases: query(`
+        SELECT al.id, al.name, al.album_type AS album_group, al.release_date, al.image_url,
+               al.is_saved, al.unsaved_at, al.removed_at,
+               (SELECT group_concat(a.name, ', ' ORDER BY aa.position)
+                  FROM album_artists aa JOIN artists a ON a.id = aa.artist_id
+                 WHERE aa.album_id = al.id) AS artists
+        FROM albums al
+        WHERE al.release_date >= date('now', '-90 days')
+          AND (EXISTS (SELECT 1 FROM artist_albums x JOIN artists a ON a.id = x.artist_id
+                        WHERE x.album_id = al.id AND a.is_followed = 1)
+            OR EXISTS (SELECT 1 FROM album_artists x JOIN artists a ON a.id = x.artist_id
+                        WHERE x.album_id = al.id AND a.is_followed = 1))
+        ORDER BY al.release_date DESC LIMIT 36`),
       history: (query('SELECT COUNT(*) n, SUM(ms_played) ms FROM history_plays')[0] as { n: number; ms: number }).n
         ? {
             ...query('SELECT COUNT(*) n, SUM(ms_played) ms, MIN(ts) first, MAX(ts) last FROM history_plays')[0] as object,

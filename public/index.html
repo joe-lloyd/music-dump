@@ -268,7 +268,8 @@ const views = {
         <div class="card"><h2>Top genres (by liked tracks)</h2>
           ${s.genres.length ? `<div class="bars">${gbars}</div>` : '<div class="empty">genres still hydrating — check back after the next sync</div>'}</div>
         ${h ? `<div class="card"><h2>Lifetime listening per month (${day(h.first)} → ${day(h.last)})</h2>${monthChart(h.perMonth, 'plays')}</div>` : ''}
-      </div>`;
+      </div>
+      ${s.releases?.length ? `<h2>New & upcoming from artists you follow (last 90 days)</h2><div class="grid">${s.releases.map(albumCell).join('')}</div>` : ''}`;
   },
 
   async artists() {

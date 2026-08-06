@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { initAuth } from './auth.ts';
 
 try {
@@ -18,6 +18,33 @@ const TOP_LIMIT = Number(process.env.SPOTIFY_TOP_LIMIT ?? 500);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const IMG_DIR = path.join(path.dirname(DB_FILE), 'images');
+
+// New-release alerts via the homelab ntfy (write-only service token). All
+// optional — without a token the exporter just logs releases.
+const NTFY_URL = process.env.NTFY_URL ?? 'http://ntfy:8080';
+const NTFY_TOPIC = process.env.NTFY_TOPIC ?? 'homelab';
+function ntfyToken(): string | null {
+  if (process.env.NTFY_TOKEN) return process.env.NTFY_TOKEN;
+  try {
+    return readFileSync(process.env.NTFY_TOKEN_FILE ?? '', 'utf8').trim() || null;
+  } catch {
+    return null;
+  }
+}
+async function notify(message: string): Promise<void> {
+  const token = ntfyToken();
+  if (!token) return;
+  try {
+    const res = await fetch(`${NTFY_URL}/${NTFY_TOPIC}`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'x-title': 'New release', 'x-tags': 'musical_note' },
+      body: message,
+    });
+    if (!res.ok) console.warn(`ntfy publish failed (${res.status})`);
+  } catch (err) {
+    console.warn(`ntfy unreachable: ${(err as Error).message}`);
+  }
+}
 
 interface SavedTrackItem { added_at: string; track: ApiTrack }
 interface SavedAlbumItem { added_at: string; album: ApiAlbum }
@@ -298,11 +325,22 @@ async function hydrate(db: TasteDb): Promise<void> {
 // popular artists first; the per-artist marker makes this resumable across
 // quota-limited runs. Newly discovered albums enter the hydration queue,
 // which fills in their track listings on this or later runs.
-async function syncDiscographies(db: TasteDb): Promise<number> {
+//
+// Once an artist's backfill is done, they get re-checked (followed daily,
+// the rest weekly) — an album appearing on a re-check with a recent or
+// upcoming release date is a NEW RELEASE and gets collected for ntfy.
+async function syncDiscographies(db: TasteDb): Promise<{ done: number; newReleases: string[] }> {
   const pending = db.db.prepare(`
-    SELECT id, name FROM artists WHERE discog_synced_at IS NULL
-    ORDER BY is_followed DESC, followers DESC`).all() as { id: string; name: string }[];
-  console.log(`Discographies: ${pending.length} artists to crawl...`);
+    SELECT id, name, (discog_synced_at IS NOT NULL) AS recheck FROM artists
+    WHERE discog_synced_at IS NULL
+       OR (is_followed = 1 AND discog_synced_at < datetime('now', '-1 day'))
+       OR discog_synced_at < datetime('now', '-7 days')
+    ORDER BY discog_synced_at IS NOT NULL, is_followed DESC, followers DESC`).all() as
+    { id: string; name: string; recheck: number }[];
+  console.log(`Discographies: ${pending.length} artists to crawl/re-check...`);
+  const newReleases: string[] = [];
+  const releaseCutoff = new Date(Date.now() - 45 * 864e5).toISOString().slice(0, 10);
+  const exists = db.db.prepare('SELECT 1 FROM albums WHERE id = ?');
   let done = 0;
   for (const artist of pending) {
     try {
@@ -310,6 +348,9 @@ async function syncDiscographies(db: TasteDb): Promise<number> {
         db.transaction(() => {
           for (const album of page.items) {
             if (!album?.id) continue;
+            if (artist.recheck && !exists.get(album.id) && (album.release_date ?? '') >= releaseCutoff) {
+              newReleases.push(`${artist.name} — ${album.name} (${album.album_type ?? 'album'}, ${album.release_date})`);
+            }
             db.upsertAlbum(album);
             db.run(
               'INSERT OR REPLACE INTO artist_albums (artist_id, album_id, album_group) VALUES (?, ?, ?)',
@@ -329,7 +370,7 @@ async function syncDiscographies(db: TasteDb): Promise<number> {
       }
       if (err instanceof ApiError && err.status === 403) {
         console.log(`  /artists/{id}/albums is blocked for this app (403) — skipping discography crawl`);
-        return done;
+        return { done, newReleases };
       }
       throw err;
     }
@@ -338,7 +379,7 @@ async function syncDiscographies(db: TasteDb): Promise<number> {
     if (done % 25 === 0) console.log(`  ${done}/${pending.length}`);
     await sleep(200);
   }
-  return done;
+  return { done, newReleases };
 }
 
 // Cover art archival: image URLs die when content is pulled from Spotify, so
@@ -395,7 +436,13 @@ async function main(): Promise<void> {
     await syncTops(db);
     summary.new_plays = await syncRecentlyPlayed(db);
     await hydrate(db);
-    summary.discographies_crawled = await syncDiscographies(db);
+    const disc = await syncDiscographies(db);
+    summary.discographies_crawled = disc.done;
+    if (disc.newReleases.length) {
+      summary.new_releases = disc.newReleases.length;
+      console.log(`New releases spotted:\n  ${disc.newReleases.join('\n  ')}`);
+      for (const release of disc.newReleases) await notify(release);
+    }
   } catch (err) {
     if (!(err instanceof ApiError && err.status === 429)) throw err;
     // Daily quota gone — everything synced so far is committed and every
