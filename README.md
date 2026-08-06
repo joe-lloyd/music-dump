@@ -64,7 +64,33 @@ GROUP BY value ORDER BY n DESC LIMIT 25;
 SELECT substr(added_at, 1, 7) AS month, COUNT(*) FROM liked_tracks GROUP BY month;
 ```
 
+## Deployment (pi-server)
+
+Runs on `pi-server` (192.168.2.23) from `~/spotify-taste-db` via cron
+(`20 */6 * * *`), inside a throwaway `node:24-alpine` container (system Node
+there is v18). Logs append to `export.log`; the DB lives at `data/spotify.db`
+on the Pi. Grab a copy for local querying with:
+
+```sh
+scp pi:spotify-taste-db/data/spotify.db /tmp/spotify.db
+```
+
+**Do not run the export from two machines**: Spotify rotates refresh tokens,
+so a second machine invalidates the first's `tokens.json`. The Pi is the
+runner; re-authorize (delete `tokens.json`, run once interactively) if the
+token ever breaks.
+
 ## Known limits
+
+- **Daily API quota** (dev-mode apps, 2026): a long `retry-after` makes the run
+  exit cleanly; the next scheduled run resumes hydration from its NULL markers.
+- **Batch/catalog restrictions** (dev-mode apps, 2026): batch `?ids=` endpoints
+  and `/playlists/{id}/tracks` return 403 — playlist tracks come from the
+  embedded page on the playlist detail endpoint, hydration goes one item at a
+  time. Playlists longer than one embedded page (~100 tracks) may be truncated
+  if the pagination link is also blocked.
+- `/me/top/*` now pages the full affinity ranking (thousands of items) — capped
+  at 500 per time range via `SPOTIFY_TOP_LIMIT` (0 = unlimited).
 
 - **No audio features** (tempo/energy/danceability): Spotify removed that endpoint
   for apps created after Nov 2024. The `tracks.isrc` column is there so you can
