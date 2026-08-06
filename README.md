@@ -3,7 +3,15 @@
 Exports your Spotify library **metadata** (no audio) into a local SQLite database:
 liked songs, saved albums (with full track listings), followed artists, playlists,
 top artists/tracks per time range, and recently played. Artists are hydrated with
-genres and follower counts; albums with label and popularity.
+genres and follower counts; albums with label, popularity and track listings.
+
+It also archives, so the data survives content being pulled from Spotify:
+
+- **Full discographies** — every album/single/compilation per known artist
+  (`artist_albums`), followed artists first, resumable across quota-limited runs.
+- **Cover art binaries** — album covers and artist images downloaded to
+  `data/images/{albums,artists}/<id>.jpg` (CDN fetches, not counted against the
+  API quota).
 
 Zero runtime dependencies — uses Node's built-in `fetch` and `node:sqlite`.
 Requires **Node >= 23.6** (runs TypeScript natively).

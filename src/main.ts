@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { initAuth } from './auth.ts';
 
 try {
@@ -16,8 +17,10 @@ const TIME_RANGES = ['short_term', 'medium_term', 'long_term'] as const;
 const TOP_LIMIT = Number(process.env.SPOTIFY_TOP_LIMIT ?? 500);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const IMG_DIR = path.join(path.dirname(DB_FILE), 'images');
+
 interface SavedTrackItem { added_at: string; track: ApiTrack }
-interface SavedAlbumItem { added_at: string; album: ApiAlbum & { tracks?: Page<ApiTrack> } }
+interface SavedAlbumItem { added_at: string; album: ApiAlbum }
 interface PlaylistItem {
   id: string;
   name: string;
@@ -68,7 +71,7 @@ async function syncSavedAlbums(db: TasteDb): Promise<number> {
       if (!item.album?.id) continue;
       db.transaction(() => db.upsertAlbum(item.album, { savedAt: item.added_at }));
       // Album track listings are embedded (first 50) and paginate beyond that.
-      let trackPage: Page<ApiTrack> | undefined = item.album.tracks;
+      let trackPage: { items?: ApiTrack[]; next?: string | null } | undefined = item.album.tracks;
       while (trackPage) {
         const tracks = trackPage.items ?? [];
         db.transaction(() => {
@@ -76,6 +79,7 @@ async function syncSavedAlbums(db: TasteDb): Promise<number> {
         });
         trackPage = trackPage.next ? await get<Page<ApiTrack>>(trackPage.next) : undefined;
       }
+      db.run('UPDATE albums SET tracks_synced = 1 WHERE id = ?', item.album.id);
       count++;
     }
     console.log(`  ${count}/${page.total ?? '?'}`);
@@ -229,20 +233,121 @@ async function hydrate(db: TasteDb): Promise<void> {
     await sleep(250);
   }
 
-  const albumIds = (db.db.prepare('SELECT id FROM albums WHERE label IS NULL').all() as { id: string }[]).map((r) => r.id);
-  console.log(`Hydrating ${albumIds.length} albums (label, popularity)...`);
+  // Saved and liked albums first; discography stubs fill the tail of the queue.
+  const albumIds = (db.db.prepare(`
+    SELECT id FROM albums WHERE label IS NULL OR tracks_synced = 0
+    ORDER BY is_saved DESC, (SELECT COUNT(*) FROM tracks t JOIN liked_tracks lt ON lt.track_id = t.id
+                              WHERE t.album_id = albums.id) DESC`).all() as { id: string }[]).map((r) => r.id);
+  console.log(`Hydrating ${albumIds.length} albums (label, popularity, track listings)...`);
   for (const [i, id] of albumIds.entries()) {
     try {
       const album = await get<ApiAlbum>(`/albums/${id}`);
-      // '' instead of NULL for label-less albums, so they aren't refetched every run.
-      db.upsertAlbum({ ...album, label: album.label ?? '' });
+      db.transaction(() => {
+        // '' instead of NULL for label-less albums, so they aren't refetched every run.
+        db.upsertAlbum({ ...album, label: album.label ?? '' });
+        for (const track of album.tracks?.items ?? []) db.upsertTrack(track, id);
+      });
+      let next = album.tracks?.next ?? null;
+      while (next) {
+        try {
+          const page = await get<Page<ApiTrack>>(next);
+          db.transaction(() => {
+            for (const track of page.items ?? []) db.upsertTrack(track, id);
+          });
+          next = page.next;
+        } catch (err) {
+          if (!(err instanceof ApiError && (err.status === 403 || err.status === 404))) throw err;
+          console.log(`  album ${id}: track pagination blocked (${err.status}), first page only`);
+          break;
+        }
+      }
+      db.run('UPDATE albums SET tracks_synced = 1 WHERE id = ?', id);
     } catch (err) {
       if (!(err instanceof ApiError && (err.status === 403 || err.status === 404))) throw err;
-      db.run(`UPDATE albums SET label = '' WHERE id = ?`, id); // unreachable — don't refetch
+      db.run(`UPDATE albums SET label = '', tracks_synced = 1 WHERE id = ?`, id); // unreachable — don't refetch
     }
     if ((i + 1) % 100 === 0) console.log(`  ${i + 1}/${albumIds.length}`);
     await sleep(250);
   }
+}
+
+// Crawl each artist's full discography (albums, singles, compilations — not
+// appears_on, which balloons into other people's compilations). Followed and
+// popular artists first; the per-artist marker makes this resumable across
+// quota-limited runs. Newly discovered albums enter the hydration queue,
+// which fills in their track listings on this or later runs.
+async function syncDiscographies(db: TasteDb): Promise<number> {
+  const pending = db.db.prepare(`
+    SELECT id, name FROM artists WHERE discog_synced_at IS NULL
+    ORDER BY is_followed DESC, followers DESC`).all() as { id: string; name: string }[];
+  console.log(`Discographies: ${pending.length} artists to crawl...`);
+  let done = 0;
+  for (const artist of pending) {
+    try {
+      for await (const page of paginate<ApiAlbum>(`/artists/${artist.id}/albums`, { include_groups: 'album,single,compilation' })) {
+        db.transaction(() => {
+          for (const album of page.items) {
+            if (!album?.id) continue;
+            db.upsertAlbum(album);
+            db.run(
+              'INSERT OR REPLACE INTO artist_albums (artist_id, album_id, album_group) VALUES (?, ?, ?)',
+              artist.id, album.id, album.album_group,
+            );
+          }
+        });
+      }
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) {
+        // ghost artist — mark done so it isn't retried forever
+        db.run('UPDATE artists SET discog_synced_at = ? WHERE id = ?', new Date().toISOString(), artist.id);
+        continue;
+      }
+      if (err instanceof ApiError && err.status === 403) {
+        console.log(`  /artists/{id}/albums is blocked for this app (403) — skipping discography crawl`);
+        return done;
+      }
+      throw err;
+    }
+    db.run('UPDATE artists SET discog_synced_at = ? WHERE id = ?', new Date().toISOString(), artist.id);
+    done++;
+    if (done % 25 === 0) console.log(`  ${done}/${pending.length}`);
+    await sleep(200);
+  }
+  return done;
+}
+
+// Cover art archival: image URLs die when content is pulled from Spotify, so
+// keep the binaries. These come from the CDN, not the API host, and don't
+// count against the daily quota — this stage runs even after a quota abort.
+async function archiveImages(db: TasteDb): Promise<number> {
+  const jobs = [
+    ...(db.db.prepare('SELECT id, image_url FROM albums WHERE image_url IS NOT NULL').all() as { id: string; image_url: string }[])
+      .map((r) => ({ url: r.image_url, file: path.join(IMG_DIR, 'albums', `${r.id}.jpg`) })),
+    ...(db.db.prepare('SELECT id, image_url FROM artists WHERE image_url IS NOT NULL').all() as { id: string; image_url: string }[])
+      .map((r) => ({ url: r.image_url, file: path.join(IMG_DIR, 'artists', `${r.id}.jpg`) })),
+  ];
+  mkdirSync(path.join(IMG_DIR, 'albums'), { recursive: true });
+  mkdirSync(path.join(IMG_DIR, 'artists'), { recursive: true });
+  let downloaded = 0;
+  let failed = 0;
+  for (const job of jobs) {
+    if (existsSync(job.file)) continue;
+    try {
+      const res = await fetch(job.url);
+      if (!res.ok) {
+        failed++;
+        continue;
+      }
+      writeFileSync(job.file, Buffer.from(await res.arrayBuffer()));
+      downloaded++;
+    } catch {
+      failed++;
+    }
+    if (downloaded > 0 && downloaded % 200 === 0) console.log(`  ${downloaded} images...`);
+    await sleep(60);
+  }
+  console.log(`  ${downloaded} new images archived${failed ? `, ${failed} failed` : ''} (${jobs.length} total known)`);
+  return downloaded;
 }
 
 async function main(): Promise<void> {
@@ -251,29 +356,35 @@ async function main(): Promise<void> {
   const startedAt = new Date().toISOString();
   const runId = db.run('INSERT INTO sync_runs (started_at) VALUES (?)', startedAt).lastInsertRowid;
 
-  const me = await get<{ id: string; display_name?: string }>('/me');
-  console.log(`Exporting library of ${me.display_name ?? me.id} → ${DB_FILE}\n`);
+  const summary: Record<string, number | string> = {};
+  try {
+    const me = await get<{ id: string; display_name?: string }>('/me');
+    console.log(`Exporting library of ${me.display_name ?? me.id} → ${DB_FILE}\n`);
+    summary.liked_tracks = await syncLikedTracks(db);
+    summary.saved_albums = await syncSavedAlbums(db);
+    summary.followed_artists = await syncFollowedArtists(db);
+    const pl = await syncPlaylists(db);
+    summary.playlists = pl.playlists;
+    summary.playlist_tracks = pl.tracks;
+    summary.playlist_items_skipped = pl.skipped;
+    await syncTops(db);
+    summary.new_plays = await syncRecentlyPlayed(db);
+    await hydrate(db);
+    summary.discographies_crawled = await syncDiscographies(db);
+  } catch (err) {
+    if (!(err instanceof ApiError && err.status === 429)) throw err;
+    // Daily quota gone — everything synced so far is committed and every
+    // crawl stage resumes from its own markers on the next run.
+    console.log(`\n${err.message} — API stages stopped for this run.`);
+    summary.quota_exhausted = 1;
+  }
 
-  const liked = await syncLikedTracks(db);
-  const albums = await syncSavedAlbums(db);
-  const followed = await syncFollowedArtists(db);
-  const pl = await syncPlaylists(db);
-  await syncTops(db);
-  const plays = await syncRecentlyPlayed(db);
-  await hydrate(db);
+  console.log('Archiving cover art (CDN, not quota-limited)...');
+  summary.images_archived = await archiveImages(db);
 
-  const summary = {
-    liked_tracks: liked,
-    saved_albums: albums,
-    followed_artists: followed,
-    playlists: pl.playlists,
-    playlist_tracks: pl.tracks,
-    playlist_items_skipped: pl.skipped,
-    new_plays: plays,
-    total_tracks: db.count('tracks'),
-    total_artists: db.count('artists'),
-    total_albums: db.count('albums'),
-  };
+  summary.total_tracks = db.count('tracks');
+  summary.total_artists = db.count('artists');
+  summary.total_albums = db.count('albums');
   db.run(
     'UPDATE sync_runs SET finished_at = ?, summary = ? WHERE id = ?',
     new Date().toISOString(), JSON.stringify(summary), runId,
@@ -286,12 +397,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  if (err instanceof ApiError && err.status === 429) {
-    // Everything synced so far is committed, and hydration resumes from its
-    // NULL markers — the next scheduled run picks up where this one stopped.
-    console.log(`\n${err.message} — stopping this run; the next one resumes automatically.`);
-    process.exit(0);
-  }
   console.error(err);
   process.exit(1);
 });

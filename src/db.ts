@@ -105,6 +105,15 @@ CREATE TABLE IF NOT EXISTS plays (
   context_uri TEXT
 );
 
+-- Full discographies (albums/singles/compilations per artist), crawled so the
+-- library survives content being pulled from Spotify.
+CREATE TABLE IF NOT EXISTS artist_albums (
+  artist_id TEXT NOT NULL REFERENCES artists(id),
+  album_id TEXT NOT NULL REFERENCES albums(id),
+  album_group TEXT,            -- album | single | compilation
+  PRIMARY KEY (artist_id, album_id)
+);
+
 CREATE TABLE IF NOT EXISTS sync_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   started_at TEXT NOT NULL,
@@ -139,6 +148,7 @@ export interface ApiAlbum {
   id: string;
   name: string;
   album_type?: string;
+  album_group?: string; // present on /artists/{id}/albums items
   release_date?: string;
   release_date_precision?: string;
   total_tracks?: number;
@@ -146,6 +156,7 @@ export interface ApiAlbum {
   popularity?: number;
   images?: { url: string }[];
   artists?: ApiArtist[];
+  tracks?: { items?: ApiTrack[]; next?: string | null };
 }
 
 export interface ApiTrack {
@@ -172,6 +183,17 @@ export class TasteDb {
     mkdirSync(path.dirname(file), { recursive: true });
     this.db = new DatabaseSync(file);
     this.db.exec(SCHEMA);
+    // Migrations for columns added after the first release.
+    for (const ddl of [
+      `ALTER TABLE artists ADD COLUMN discog_synced_at TEXT`,
+      `ALTER TABLE albums ADD COLUMN tracks_synced INTEGER NOT NULL DEFAULT 0`,
+    ]) {
+      try {
+        this.db.exec(ddl);
+      } catch {
+        // column already exists
+      }
+    }
   }
 
   private prepare(sql: string): StatementSync {
