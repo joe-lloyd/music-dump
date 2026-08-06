@@ -27,3 +27,27 @@ services:
       options:
         max-size: "5m"
         max-file: "3"
+
+  # Read-only browse UI over the same DB (https://music.home.arpa via Caddy).
+  # Joins homelab-net so caddy_server can reach it by container name; no
+  # published ports. The volume stays rw because SQLite's WAL mode needs to
+  # manage -shm/-wal files even for read-only connections.
+  web:
+    image: node:24-alpine
+    container_name: spotify-taste-db-web
+    working_dir: /app
+    command: ["node", "--disable-warning=ExperimentalWarning", "src/server.ts"]
+    restart: unless-stopped
+    init: true
+    volumes:
+      - .:/app
+    networks: [default, homelab-net]
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+networks:
+  homelab-net:
+    external: true
