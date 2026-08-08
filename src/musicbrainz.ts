@@ -21,8 +21,9 @@ async function mbGet(pathName: string, params: Record<string, string>): Promise<
   for (const [k, v] of Object.entries({ ...params, fmt: 'json' })) url.searchParams.set(k, v);
   for (let attempt = 1; ; attempt++) {
     const res = await fetch(url, { headers: { 'user-agent': UA } });
-    if ((res.status === 429 || res.status === 503) && attempt <= 4) {
-      await sleep(2000 * attempt);
+    // MB throws 503s liberally when busy — back off hard before giving up.
+    if ((res.status === 429 || res.status === 503) && attempt <= 5) {
+      await sleep(4000 * attempt);
       continue;
     }
     if (res.status === 404) return null;
@@ -95,6 +96,7 @@ export async function syncMusicBrainz(db: TasteDb): Promise<number> {
   console.log(`MusicBrainz: resolving ${pending.length} artists...`);
   let resolved = 0;
   let done = 0;
+  let failures = 0;
   for (const artist of pending) {
     let mbid: string | null = null;
     let method = 'isrc';
@@ -104,10 +106,17 @@ export async function syncMusicBrainz(db: TasteDb): Promise<number> {
         method = 'name';
         mbid = await resolveViaSearch(artist.name);
       }
+      failures = 0;
     } catch (err) {
-      // Leave no row behind — the artist is retried next run.
-      console.warn(`MusicBrainz: aborting for this run: ${(err as Error).message}`);
-      break;
+      // Leave no row behind — this artist is retried next run. One flaky 503
+      // shouldn't kill the run; a streak means MB is down, stop hammering.
+      if (++failures >= 3) {
+        console.warn(`MusicBrainz: ${failures} artists failed in a row — stopping for this run (${(err as Error).message})`);
+        break;
+      }
+      console.warn(`MusicBrainz: skipping ${artist.name}: ${(err as Error).message}`);
+      await sleep(5000);
+      continue;
     }
     db.run(
       `INSERT OR REPLACE INTO artist_mbid (artist_id, mbid, method, resolved_at) VALUES (?, ?, ?, ?)`,
