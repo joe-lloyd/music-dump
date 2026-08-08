@@ -56,6 +56,12 @@ services:
       EVENT_COUNTRIES: "NL,BE,DE"
     volumes:
       - .:/app
+    # Bound to the Pi's LAN IP so Lidarr on eliot can pull /api/lidarr-list
+    # cross-host (plain http, no CA hassle). Caddy still fronts the browse UI
+    # at music.home.arpa via homelab-net; this port only serves the
+    # machine-readable list. LAN IP, not 0.0.0.0, to keep it off other ifaces.
+    ports:
+      - "192.168.2.23:8091:8080"
     networks: [default, homelab-net]
     logging:
       driver: json-file
