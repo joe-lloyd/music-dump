@@ -54,7 +54,8 @@ async function resolveViaIsrc(db: TasteDb, artistId: string, artistName: string)
     LIMIT 2`).all(artistId) as { isrc: string }[]).map((r) => r.isrc);
   const wanted = normalize(artistName);
   for (const isrc of isrcs) {
-    const body = await mbGet(`isrc/${encodeURIComponent(isrc)}`, { inc: 'artist-credits' });
+    // MB 400s on lowercase ISRCs; Spotify sometimes stores them lowercase.
+    const body = await mbGet(`isrc/${encodeURIComponent(isrc.toUpperCase())}`, { inc: 'artist-credits' });
     await sleep(1100);
     for (const rec of body?.recordings ?? []) {
       for (const credit of rec['artist-credit'] ?? []) {
