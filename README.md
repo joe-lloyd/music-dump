@@ -125,6 +125,19 @@ checks every followed artist's upcoming events, fills the **Shows** tab
 and pings ntfy (with a tap-through ticket link) whenever a new nearby show
 appears. Without the key the stage just skips.
 
+## Lidarr import list
+
+The daily run resolves each interesting artist (followed, or ≥3 liked tracks —
+`LIDARR_MIN_LIKED`) to a MusicBrainz artist id, ISRC lookup first and exact
+name search as fallback (`src/musicbrainz.ts`, cached in `artist_mbid`, capped
+at `LIDARR_MB_LIMIT`=500 lookups/run at MusicBrainz's 1 req/s). The web UI then
+serves **`/api/lidarr-list`** — `[{"MusicBrainzId": …, "ArtistName": …}, …]` —
+which Lidarr consumes as a *Custom List* import list
+(`http://spotify-taste-db-web:8080/api/lidarr-list` over `homelab-net`).
+No-match artists are recorded as `''` and retried monthly; only exact
+normalized name matches are accepted, so a miss beats monitoring a stranger's
+discography.
+
 ## Importing your lifetime listening history
 
 Request "Extended streaming history" at <https://www.spotify.com/account/privacy/>

@@ -289,6 +289,19 @@ const api: Record<string, (params: URLSearchParams) => unknown> = {
     };
   },
 
+  // Lidarr "Custom List" feed: [{MusicBrainzId, ArtistName}]. MBIDs come from
+  // the artist_mbid cache (src/musicbrainz.ts); eligibility mirrors that
+  // stage's rule (followed, or ≥ LIDARR_MIN_LIKED liked tracks) so an artist
+  // unfollowed later drops out of the feed even though the cache row stays.
+  '/api/lidarr-list': () => query(`
+    SELECT am.mbid AS MusicBrainzId, a.name AS ArtistName
+    FROM artist_mbid am JOIN artists a ON a.id = am.artist_id
+    WHERE am.mbid <> '' AND a.removed_at IS NULL
+      AND (a.is_followed = 1
+        OR (SELECT COUNT(*) FROM track_artists ta JOIN liked_tracks lt ON lt.track_id = ta.track_id
+             WHERE ta.artist_id = a.id AND lt.removed_at IS NULL) >= ?)
+    ORDER BY a.name`, Number(process.env.LIDARR_MIN_LIKED ?? 3)),
+
   '/api/plays': () => query(`
     SELECT p.played_at, p.context_type, t.id, t.name, al.image_url, al.id AS album_id,
            (SELECT group_concat(a.name, ', ' ORDER BY ta.position)

@@ -9,6 +9,7 @@ try {
 }
 import { ApiError, get, paginate, type Page } from './api.ts';
 import { TasteDb, type ApiAlbum, type ApiArtist, type ApiTrack } from './db.ts';
+import { syncMusicBrainz } from './musicbrainz.ts';
 
 const DB_FILE = process.env.SPOTIFY_DB ?? path.join(import.meta.dirname, '..', 'data', 'spotify.db');
 const TIME_RANGES = ['short_term', 'medium_term', 'long_term'] as const;
@@ -569,6 +570,13 @@ async function main(): Promise<void> {
     summary.events_seen = await syncEvents(db);
   } catch (err) {
     console.warn(`Concerts sync failed: ${(err as Error).message}`);
+  }
+
+  // MusicBrainz ids for the Lidarr import list — also its own API and limits.
+  try {
+    summary.mbids_resolved = await syncMusicBrainz(db);
+  } catch (err) {
+    console.warn(`MusicBrainz sync failed: ${(err as Error).message}`);
   }
 
   summary.total_tracks = db.count('tracks');

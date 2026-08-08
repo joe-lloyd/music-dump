@@ -152,6 +152,16 @@ CREATE TABLE IF NOT EXISTS events (
   last_seen_at TEXT NOT NULL
 );
 
+-- Spotify artist → MusicBrainz id cache, filled by src/musicbrainz.ts and
+-- served to Lidarr via /api/lidarr-list. '' = looked up, no confident match
+-- (retried monthly); a real MBID is permanent.
+CREATE TABLE IF NOT EXISTS artist_mbid (
+  artist_id TEXT PRIMARY KEY REFERENCES artists(id),
+  mbid TEXT NOT NULL DEFAULT '',
+  method TEXT,                 -- isrc | name
+  resolved_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sync_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   started_at TEXT NOT NULL,
