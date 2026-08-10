@@ -20,6 +20,32 @@ function query(sql: string, ...args: (string | number)[]): unknown[] {
   }
 }
 
+// The Lidarr download-state tables are written by an external poller
+// (HomeLab repo: pi-server/lidarr-library-sync) that pulls what Lidarr has
+// actually downloaded. Ensure they exist so the read queries below never
+// throw on a fresh DB before that poller's first run; the poller then keeps
+// them populated. Additive only — never touches the exporter's tables.
+function ensureLidarrTables(): void {
+  try {
+    const db = new DatabaseSync(DB_FILE);
+    try {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS lidarr_sync (
+          id INTEGER PRIMARY KEY CHECK (id = 1), synced_at TEXT,
+          downloaded_album_count INTEGER, artists_in_lidarr INTEGER,
+          artists_matched INTEGER, tastedb_albums_checked INTEGER,
+          tastedb_albums_downloaded INTEGER);
+        CREATE TABLE IF NOT EXISTS album_download_status (
+          album_id TEXT PRIMARY KEY, downloaded INTEGER, lidarr_title TEXT,
+          match_score REAL, synced_at TEXT);`);
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    console.error('ensureLidarrTables:', (err as Error).message);
+  }
+}
+
 const api: Record<string, (params: URLSearchParams) => unknown> = {
   '/api/stats': () => {
     const one = (sql: string) => (query(sql)[0] as Record<string, unknown>) ?? {};
@@ -31,8 +57,11 @@ const api: Record<string, (params: URLSearchParams) => unknown> = {
         albums: one('SELECT COUNT(*) n FROM albums WHERE is_saved = 1').n,
         playlists: one('SELECT COUNT(*) n FROM playlists WHERE removed_at IS NULL').n,
         plays: one('SELECT COUNT(*) n FROM plays').n,
+        // Albums Lidarr has actually downloaded (>=1 file) — the ⤓ headline.
+        downloaded: one('SELECT downloaded_album_count n FROM lidarr_sync WHERE id = 1').n ?? 0,
       },
       lastSync: one('SELECT MAX(finished_at) t FROM sync_runs').t,
+      downloadsSyncedAt: one('SELECT synced_at t FROM lidarr_sync WHERE id = 1').t ?? null,
       genres: query(`
         SELECT je.value AS genre, COUNT(DISTINCT lt.track_id) AS n
         FROM liked_tracks lt
@@ -46,6 +75,7 @@ const api: Record<string, (params: URLSearchParams) => unknown> = {
       releases: query(`
         SELECT al.id, al.name, al.album_type AS album_group, al.release_date, al.image_url,
                al.is_saved, al.unsaved_at, al.removed_at,
+               (SELECT downloaded FROM album_download_status ds WHERE ds.album_id = al.id) AS downloaded,
                (SELECT group_concat(a.name, ', ' ORDER BY aa.position)
                   FROM album_artists aa JOIN artists a ON a.id = aa.artist_id
                  WHERE aa.album_id = al.id) AS artists
@@ -84,6 +114,7 @@ const api: Record<string, (params: URLSearchParams) => unknown> = {
       albums: query(`
         SELECT DISTINCT al.id, al.name, al.album_type, al.release_date, al.image_url,
                al.total_tracks, al.is_saved, al.unsaved_at, al.removed_at, al.label,
+               (SELECT downloaded FROM album_download_status ds WHERE ds.album_id = al.id) AS downloaded,
                COALESCE(aa.album_group, al.album_type) AS album_group
         FROM albums al
         LEFT JOIN artist_albums aa ON aa.album_id = al.id AND aa.artist_id = ?1
@@ -110,7 +141,9 @@ const api: Record<string, (params: URLSearchParams) => unknown> = {
   '/api/album': (params) => {
     const id = params.get('id') ?? '';
     return {
-      album: query(`SELECT * FROM albums WHERE id = ?`, id)[0] ?? null,
+      album: query(`SELECT al.*,
+               (SELECT downloaded FROM album_download_status ds WHERE ds.album_id = al.id) AS downloaded
+        FROM albums al WHERE al.id = ?`, id)[0] ?? null,
       artists: query(`
         SELECT a.id, a.name FROM album_artists aa JOIN artists a ON a.id = aa.artist_id
         WHERE aa.album_id = ? ORDER BY aa.position`, id),
@@ -138,6 +171,7 @@ const api: Record<string, (params: URLSearchParams) => unknown> = {
   '/api/albums': () => query(`
     SELECT al.id, al.name, al.album_type, al.release_date, al.label, al.popularity,
            al.image_url, al.saved_at, al.total_tracks, al.is_saved, al.unsaved_at, al.removed_at,
+           (SELECT downloaded FROM album_download_status ds WHERE ds.album_id = al.id) AS downloaded,
            (SELECT group_concat(a.name, ', ' ORDER BY aa.position)
               FROM album_artists aa JOIN artists a ON a.id = aa.artist_id
              WHERE aa.album_id = al.id) AS artists
@@ -153,6 +187,7 @@ const api: Record<string, (params: URLSearchParams) => unknown> = {
     return query(`
       SELECT al.id, al.name, al.album_type, al.release_date, al.image_url,
              al.total_tracks, al.is_saved, al.unsaved_at, al.removed_at,
+             (SELECT downloaded FROM album_download_status ds WHERE ds.album_id = al.id) AS downloaded,
              (SELECT group_concat(a.name, ', ' ORDER BY aa.position)
                 FROM album_artists aa JOIN artists a ON a.id = aa.artist_id
                WHERE aa.album_id = al.id) AS artists
@@ -351,4 +386,5 @@ const server = http.createServer((req, res) => {
   }
 });
 
+ensureLidarrTables();
 server.listen(PORT, () => console.log(`taste-db ui on :${PORT}, db: ${DB_FILE}`));

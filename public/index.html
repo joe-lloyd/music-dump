@@ -55,6 +55,12 @@
   .pic .ph { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
              background: var(--accent-soft); color: var(--accent); font-size: 2rem; font-weight: 700;
              border-radius: 8px; }
+  /* "downloaded in the Lidarr library" marker, overlaid on album art */
+  .pic .dl { position: absolute; top: .3rem; right: .3rem; width: 1.5rem; height: 1.5rem;
+             display: flex; align-items: center; justify-content: center;
+             background: var(--accent); color: #fff; border-radius: 6px;
+             box-shadow: 0 1px 4px rgba(0, 0, 0, .4); }
+  .pic .dl svg { width: 1rem; height: 1rem; }
   .cell .nm { font-size: .85rem; font-weight: 600; margin-top: .4rem;
               overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cell .sub, .sub { font-size: .74rem; color: var(--ink-2);
@@ -128,11 +134,15 @@ function imgErr(el) {
   el.style.display = 'none';
   el.nextElementSibling.style.display = 'flex';
 }
-const pic = (kind, id, cdnUrl, name) => `
+// Download glyph (down-arrow into a tray) + the overlay badge for downloaded albums.
+const DL = '<svg viewBox="0 0 24 24" width="1em" height="1em" aria-hidden="true"><path fill="currentColor" d="M11 3h2v8h3l-4 4-4-4h3z"/><path fill="currentColor" d="M5 19h14v2H5z"/></svg>';
+const dlBadge = `<span class="dl" title="downloaded in the library">${DL}</span>`;
+const pic = (kind, id, cdnUrl, name, overlay = '') => `
   <div class="pic">
     <img src="${id ? `/img/${kind}/${esc(id)}.jpg` : ''}" alt="" loading="lazy"
          data-cdn="${esc(cdnUrl ?? '')}" onerror="imgErr(this)">
     <div class="ph" style="display:none">${esc((name ?? '?')[0].toUpperCase())}</div>
+    ${overlay}
   </div>`;
 const spotify = (type, id) => `<a class="ext" href="https://open.spotify.com/${type}/${id}" target="_blank" rel="noopener" title="open in Spotify">↗</a>`;
 const spbtn = (type, id) => `<a class="spbtn" href="https://open.spotify.com/${type}/${id}" target="_blank" rel="noopener">Open in Spotify ↗</a>`;
@@ -252,7 +262,7 @@ const eventRow = (e) => `
 
 const albumCell = (a) => `
   <div class="cell">
-    <a href="#album/${a.id}">${pic('albums', a.id, a.image_url, a.name)}
+    <a href="#album/${a.id}">${pic('albums', a.id, a.image_url, a.name, a.downloaded ? dlBadge : '')}
       <div class="nm">${esc(a.name)}</div></a>
     <div class="sub">${esc(a.artists ?? '')}</div>
     <div class="sub">${(a.release_date ?? '').slice(0, 4)}${a.album_group && a.album_group !== 'album' ? ' · ' + esc(a.album_group) : ''}${a.is_saved ? ' · saved ✓' : ''}</div>
@@ -268,12 +278,16 @@ const views = {
                    ['saved albums', c.albums], ['playlists', c.playlists], ['plays captured', c.plays],
                    ...(h ? [['lifetime plays', Number(h.n).toLocaleString()], ['hours listened', Math.round(h.ms / 3.6e6).toLocaleString()]] : [])]
       .map(([k, v]) => `<div class="tile"><b>${v}</b><span>${k}</span></div>`).join('');
+    // Albums actually in the download library (from the Lidarr sync). Leads the
+    // row, accent-coloured, with the ⤓ icon and a freshness stamp.
+    const dlTile = `<div class="tile"><b style="color:var(--accent)">${DL} ${(c.downloaded ?? 0).toLocaleString()}</b>` +
+      `<span>albums downloaded${s.downloadsSyncedAt ? ` · ${ago(s.downloadsSyncedAt)}` : ''}</span></div>`;
     const gmax = Math.max(...s.genres.map((g) => g.n), 1);
     const gbars = s.genres.map((g) => `
       <div class="lbl">${esc(g.genre)}</div>
       <div class="bar" style="width:${Math.round((g.n / gmax) * 100)}%" data-tip="${esc(g.genre)} · ${g.n} liked tracks"></div>
       <div class="n">${g.n}</div>`).join('');
-    return `<div class="tiles">${tiles}</div>
+    return `<div class="tiles">${dlTile}${tiles}</div>
       <div class="cards">
         <div class="card"><h2>Liked songs added per month</h2>${monthChart(s.likedPerMonth)}</div>
         <div class="card"><h2>Top genres (by liked tracks)</h2>
@@ -405,7 +419,7 @@ const views = {
       return (discs.length > 1 ? `<h2>Disc ${disc}</h2>` : '') + `<div class="rows">${rows}</div>`;
     }).join('');
     return `<div class="hero">
-        ${pic('albums', al.id, al.image_url, al.name)}
+        ${pic('albums', al.id, al.image_url, al.name, al.downloaded ? dlBadge : '')}
         <div>
           <h1>${esc(al.name)}</h1>
           <div class="meta">${artistLinks}</div>
