@@ -18,6 +18,27 @@ const TIME_RANGES = ['short_term', 'medium_term', 'long_term'] as const;
 const TOP_LIMIT = Number(process.env.SPOTIFY_TOP_LIMIT ?? 500);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// --- Discography crawl tuning -------------------------------------------
+// A cold start has ~1.9k artists to backfill. Doing them all in one run burns
+// the daily quota and risks a mid-run abort that loses the lot, so each run
+// takes a fixed BUDGET off the front of the queue: the backlog drains over a
+// few nights and then settles into cheap re-checks. 0 = unlimited.
+const DISCOG_BUDGET = Number(process.env.SPOTIFY_DISCOG_BUDGET ?? 250);
+// Re-check cadence for artists that are NOT followed. Followed artists are
+// still re-checked daily so new releases still alert; a back catalogue from
+// years ago does not change, and re-reading it nightly was pure waste.
+const DISCOG_RECHECK_DAYS = Number(process.env.SPOTIFY_DISCOG_RECHECK_DAYS ?? 30);
+// Spotify capped this endpoint: verified 2026-08-13, limit=10 -> 200 while
+// limit=20 and limit=50 -> 400 {"message":"Invalid limit"}. The endpoint
+// default is 5, so asking for 10 halves the number of pages. Other endpoints
+// (/me/tracks, /me/albums, /me/following) still accept 50.
+const DISCOG_PAGE = Number(process.env.SPOTIFY_DISCOG_PAGE ?? 10);
+// A run of consecutive failures means something systemic (an API change like
+// the one above), not one bad artist — stop rather than march through the
+// whole budget marking everything synced.
+const DISCOG_MAX_CONSECUTIVE_FAILURES = 10;
+
+
 const IMG_DIR = path.join(path.dirname(DB_FILE), 'images');
 
 // New-release alerts via the homelab ntfy (write-only service token). All
@@ -335,17 +356,25 @@ async function syncDiscographies(db: TasteDb): Promise<{ done: number; newReleas
     SELECT id, name, (discog_synced_at IS NOT NULL) AS recheck FROM artists
     WHERE discog_synced_at IS NULL
        OR (is_followed = 1 AND discog_synced_at < datetime('now', '-1 day'))
-       OR discog_synced_at < datetime('now', '-7 days')
-    ORDER BY discog_synced_at IS NOT NULL, is_followed DESC, followers DESC`).all() as
+       OR discog_synced_at < datetime('now', ?)
+    ORDER BY discog_synced_at IS NOT NULL, is_followed DESC, followers DESC
+    LIMIT ?`).all(`-${DISCOG_RECHECK_DAYS} days`, DISCOG_BUDGET || -1) as
     { id: string; name: string; recheck: number }[];
-  console.log(`Discographies: ${pending.length} artists to crawl/re-check...`);
+  const backlog = (db.db.prepare(
+    'SELECT COUNT(*) AS n FROM artists WHERE discog_synced_at IS NULL').get() as { n: number }).n;
+  console.log(`Discographies: ${pending.length} this run (budget ${DISCOG_BUDGET}), ${backlog} never crawled...`);
   const newReleases: string[] = [];
   const releaseCutoff = new Date(Date.now() - 45 * 864e5).toISOString().slice(0, 10);
   const exists = db.db.prepare('SELECT 1 FROM albums WHERE id = ?');
+  const markSynced = (id: string) =>
+    db.run('UPDATE artists SET discog_synced_at = ? WHERE id = ?', new Date().toISOString(), id);
   let done = 0;
+  let failed = 0;
+  let consecutive = 0;
   for (const artist of pending) {
     try {
-      for await (const page of paginate<ApiAlbum>(`/artists/${artist.id}/albums`, { include_groups: 'album,single,compilation' })) {
+      for await (const page of paginate<ApiAlbum>(`/artists/${artist.id}/albums`,
+        { include_groups: 'album,single,compilation', limit: String(DISCOG_PAGE) })) {
         db.transaction(() => {
           for (const album of page.items) {
             if (!album?.id) continue;
@@ -367,19 +396,34 @@ async function syncDiscographies(db: TasteDb): Promise<{ done: number; newReleas
           'UPDATE artists SET discog_synced_at = ?, removed_at = COALESCE(removed_at, ?) WHERE id = ?',
           new Date().toISOString(), new Date().toISOString(), artist.id,
         );
+        consecutive = 0;
         continue;
       }
       if (err instanceof ApiError && err.status === 403) {
         console.log(`  /artists/{id}/albums is blocked for this app (403) — skipping discography crawl`);
         return { done, newReleases };
       }
-      throw err;
+      if (err instanceof ApiError && err.status === 429) throw err;  // quota — main() handles the abort
+      // Anything else must NOT kill the run. It used to: a single 400 threw
+      // straight out of the phase, so discog_synced_at never advanced for any
+      // artist and the identical backlog came back the next night, for ever.
+      failed++;
+      consecutive++;
+      console.log(`  ! ${artist.name}: ${err instanceof Error ? err.message.slice(0, 140) : String(err)}`);
+      markSynced(artist.id);   // rotates back round in DISCOG_RECHECK_DAYS
+      if (consecutive >= DISCOG_MAX_CONSECUTIVE_FAILURES) {
+        console.log(`  ! ${consecutive} consecutive failures — stopping, this looks systemic not per-artist`);
+        return { done, newReleases };
+      }
+      continue;
     }
-    db.run('UPDATE artists SET discog_synced_at = ? WHERE id = ?', new Date().toISOString(), artist.id);
+    consecutive = 0;
+    markSynced(artist.id);
     done++;
     if (done % 25 === 0) console.log(`  ${done}/${pending.length}`);
     await sleep(200);
   }
+  if (failed) console.log(`  ${failed} artist(s) failed this run and were deferred`);
   return { done, newReleases };
 }
 
