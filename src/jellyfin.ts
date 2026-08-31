@@ -26,6 +26,7 @@ interface JellyfinAudioItem {
   IndexNumber?: number;
   ParentIndexNumber?: number;
   Container?: string;
+  Path?: string;
 }
 
 interface JellyfinItemsResponse {
@@ -36,6 +37,7 @@ interface JellyfinItemsResponse {
 export interface PlayerMatch {
   itemId: string;
   container: string | null;
+  path: string | null;
   score: number;
 }
 
@@ -186,7 +188,7 @@ export class JellyfinBridge {
       const params = new URLSearchParams({
         recursive: 'true',
         includeItemTypes: 'Audio',
-        fields: 'Album,AlbumArtists,Artists,RunTimeTicks,IndexNumber,ParentIndexNumber,Container',
+        fields: 'Album,AlbumArtists,Artists,RunTimeTicks,IndexNumber,ParentIndexNumber,Container,Path',
         enableTotalRecordCount: 'true',
         limit: '100000',
       });
@@ -224,6 +226,7 @@ export class JellyfinBridge {
     return {
       itemId: ranked[0].item.Id,
       container: ranked[0].item.Container ?? null,
+      path: ranked[0].item.Path ?? null,
       score: ranked[0].score,
     };
   }
@@ -328,6 +331,12 @@ export class JellyfinBridge {
     } finally {
       clearTimeout(connectTimer);
     }
+  }
+
+  async refreshLibrary(): Promise<void> {
+    await this.request('/Library/Refresh', { method: 'POST' });
+    // Do not serve the old index while Jellyfin is discovering the replacement.
+    this.indexedAt = 0;
   }
 
   async wake(): Promise<void> {

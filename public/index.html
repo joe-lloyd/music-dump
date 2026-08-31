@@ -224,6 +224,13 @@ const ago = (iso) => {
   if (m < 1440) return `${Math.round(m / 60)}h ago`;
   return `${Math.round(m / 1440)}d ago`;
 };
+const until = (iso) => {
+  const m = (new Date(iso).getTime() - Date.now()) / 60000;
+  if (m <= 0) return 'due now';
+  if (m < 60) return `in ${Math.max(1, Math.round(m))}m`;
+  if (m < 1440) return `in ${Math.round(m / 60)}h`;
+  return `in ${Math.round(m / 1440)}d`;
+};
 // Local archive first (survives Spotify deletions), CDN fallback, then initial.
 function imgErr(el) {
   const cdn = el.dataset.cdn;
@@ -236,6 +243,7 @@ const DL = '<svg viewBox="0 0 24 24" width="1em" height="1em" aria-hidden="true"
 const dlBadge = `<span class="dl" title="downloaded in the library">${DL}</span>`;
 const PLAY = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z"/></svg>';
 const playControl = (track) => track.id ? `<button class="track-play" type="button" data-track-id="${esc(track.id)}" data-track-name="${esc(track.name)}" data-track-artists="${esc(track.artists ?? track.artist_name ?? '')}" data-track-duration="${Number(track.duration_ms ?? 0)}" aria-label="Play ${esc(track.name)}">${PLAY}</button>` : '';
+const upgradeControl = (track) => track.id ? `<button class="track-upgrade" type="button" data-upgrade-track="${esc(track.id)}" aria-label="Queue ${esc(track.name)} for a FLAC upgrade" title="Queue FLAC upgrade"><span>FLAC</span>&uarr;</button>` : '';
 const pic = (kind, id, cdnUrl, name, overlay = '') => `
   <div class="pic">
     <img src="${id ? `/img/${kind}/${esc(id)}.jpg` : ''}" alt="" loading="lazy"
@@ -277,6 +285,16 @@ const badges = (row) => chips([
 
 const cache = {};
 async function api(p) { return cache[p] ??= await (await fetch(p)).json(); }
+
+let noticeTimer;
+function notice(message, bad = false) {
+  const el = $('#toast');
+  el.textContent = message;
+  el.classList.toggle('bad', bad);
+  el.classList.add('on');
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => el.classList.remove('on'), 3500);
+}
 
 const tip = $('#tip');
 function tipOn(el, text) {
@@ -342,6 +360,26 @@ function stackChart(points, labelOf) {
     <text x="${W}" y="${H - 4}" text-anchor="end">${esc(labelOf(points.at(-1)))}</text></svg>`;
 }
 
+// Cumulative share-of-plays over ranked tracks: how deep the obsession
+// runs. Single hue, the 50% crossing gets a marked dot.
+function rabbitChart(pts, halfIdx) {
+  const W = 660, H = 170, base = H - 22, top = 14;
+  const x = (i) => Math.round((i / Math.max(pts.length - 1, 1)) * (W - 8)) + 4;
+  const y = (pct) => Math.round(base - (pct / 100) * (base - top));
+  const path = pts.map((p, i) => `${i ? 'L' : 'M'}${x(i)},${y(p.pct)}`).join(' ');
+  const hovers = pts.map((p, i) => `<rect x="${x(i) - Math.ceil(W / pts.length / 2)}" y="0" width="${Math.ceil(W / pts.length)}" height="${H}" fill="transparent" data-tip="#${i + 1} ${esc(p.name)} — top ${i + 1} tracks = ${p.pct.toFixed(1)}% of plays"/>`).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%">
+    <line x1="4" y1="${y(50)}" x2="${W - 4}" y2="${y(50)}" stroke="rgba(244,232,242,.14)" stroke-dasharray="3 4"/>
+    <path d="${path} L${x(pts.length - 1)},${base} L${x(0)},${base} Z" fill="rgba(217,59,180,.13)"/>
+    <path d="${path}" fill="none" stroke="#d93bb4" stroke-width="2"/>
+    ${halfIdx >= 0 ? `<circle cx="${x(halfIdx)}" cy="${y(pts[halfIdx].pct)}" r="4.5" fill="#d93bb4" stroke="#0a080a" stroke-width="2"/>` : ''}
+    ${hovers}
+    <text x="4" y="${H - 6}">#1</text>
+    <text x="4" y="${y(50) - 5}">50%</text>
+    <text x="${W - 4}" y="${H - 6}" text-anchor="end">#${pts.length}</text>
+  </svg>`;
+}
+
 // Single-series rhythm bars (hours of the day, days of the week).
 function rhythmChart(buckets, labels, tipOf) {
   const W = 660, H = 130, base = H - 20;
@@ -399,6 +437,7 @@ const slimRow = (t, endText) => `
     <span class="heart">${t.liked || (t.added_at && !t.removed_at) ? '♥' : ''}</span>
     <div class="mid"><div>${esc(t.name)} ${t.removed_at ? chip(`un-liked ${day(t.removed_at)}`, true) : ''}</div></div>
     <div class="end">${endText ?? dur(t.duration_ms)}</div>
+    ${upgradeControl(t)}
     ${spotify('track', t.id)}
   </div>`;
 const songGroup = (al) => groupHead(al) + `<div class="rows">${al.tracks.map((t) => slimRow(t)).join('')}</div>`;
@@ -417,6 +456,7 @@ const trackRow = (t, endText, rank) => {
       <div class="sub">${esc(t.artists ?? '')}${t.album ? ` · <a href="${albumHref ?? '#'}">${esc(t.album)}</a>` : ''}</div>
     </div>
     <div class="end">${endText}</div>
+    ${upgradeControl(t)}
     ${spotify('track', t.id)}
   </div>`;
 };
@@ -596,6 +636,48 @@ const views = {
       ${d.elsewhere.length ? `<h2>Elsewhere (${d.elsewhere.length})</h2><div class="gig-grid">${d.elsewhere.map((e, i) => gigCard(e, i)).join('')}</div>` : ''}`;
   },
 
+  async upgrades() {
+    const d = await (await fetch('/api/upgrades', { cache: 'no-store' })).json();
+    const active = ['pending_source', 'queued', 'working', 'retry_wait'].reduce((n, k) => n + Number(d.counts?.[k] ?? 0), 0);
+    const finished = Number(d.counts?.upgraded ?? 0) + Number(d.counts?.already_lossless ?? 0);
+    const statusLabel = {
+      pending_source: 'downloading MP3', queued: 'ready for Soulseek', working: 'working now',
+      retry_wait: 'retry scheduled', upgraded: 'upgraded', already_lossless: 'already lossless',
+      exhausted: 'retries exhausted', cancelled: 'cancelled',
+    };
+    const rows = (d.jobs ?? []).map((j) => {
+      const due = j.next_attempt_at && ['retry_wait', 'queued', 'pending_source'].includes(j.status)
+        ? ` &middot; ${j.status === 'retry_wait' ? 'retry ' : ''}${until(j.next_attempt_at)}` : '';
+      const tries = j.phase === 'source' ? `${j.source_attempts}/3 source tries` : `${j.upgrade_attempts}/${j.max_attempts} FLAC tries`;
+      const controls = j.status === 'exhausted'
+        ? `<button type="button" data-upgrade-retry="${j.id}">Retry now</button>`
+        : ['pending_source', 'queued', 'retry_wait'].includes(j.status)
+          ? `<button type="button" data-upgrade-cancel="${j.id}">Cancel</button>` : '';
+      return `<div class="upgrade-row">
+        <span class="upgrade-state ${esc(j.status)}">${esc(statusLabel[j.status] ?? j.status)}</span>
+        <div class="mid"><b>${esc(j.title)}</b><span>${esc(j.artist)}${j.album ? ` &middot; ${esc(j.album)}` : ''}</span>
+          <small>${tries}${due}${j.current_codec ? ` &middot; now ${esc(j.current_codec.toUpperCase())}` : ''}</small>
+          ${j.last_error ? `<em>${esc(j.last_error)}</em>` : ''}</div>
+        <div class="upgrade-actions">${controls}</div>
+      </div>`;
+    }).join('');
+    return `<div class="upgrade-intro">
+        <div><span class="eyebrow">Lossy now, lossless later</span><h2>Feed the archive today. Let FLAC catch up.</h2>
+          <p>On the next worker sweep, a source link becomes an MP3; later Soulseek sweeps replace it only after codec, duration, artist and title checks pass.</p></div>
+        <div class="upgrade-stats"><b>${active}</b><span>active</span><b>${finished}</b><span>finished</span></div>
+      </div>
+      <form class="upgrade-form" id="upgrade-form">
+        <label><span>Spotify or YouTube URL</span><input name="sourceUrl" type="url" required placeholder="https://open.spotify.com/track/..."></label>
+        <label><span>Artist <small>(needed for YouTube)</small></span><input name="artist" placeholder="Artist"></label>
+        <label><span>Title <small>(needed for YouTube)</small></span><input name="title" placeholder="Song title"></label>
+        <label><span>Album <small>(optional)</small></span><input name="album" placeholder="Album"></label>
+        <label><span>FLAC attempts</span><input name="maxAttempts" type="number" min="1" max="20" value="6"></label>
+        <button class="primary-action" type="submit">Add to archive + FLAC queue</button>
+      </form>
+      <div class="note">Spotify tracks already known to this archive fill their own metadata. For a new Spotify or YouTube link, enter artist/title. Retry waits use exponential backoff with jitter; Retry now grants one more attempt after exhaustion.</div>
+      <h2>Upgrade queue</h2><div class="upgrade-list">${rows || '<div class="empty">nothing queued yet</div>'}</div>`;
+  },
+
   async artist(id) {
     const d = await api(`/api/artist?id=${id}`);
     if (!d.artist) return '<div class="empty">unknown artist</div>';
@@ -649,6 +731,7 @@ const views = {
           <div class="mid"><div>${esc(t.name)}</div>
             <div class="sub">${esc(t.artists ?? '')}</div></div>
           <div class="end">${dur(t.duration_ms)}</div>
+          ${upgradeControl(t)}
           ${spotify('track', t.id)}
         </div>`).join('');
       return (discs.length > 1 ? `<h2>Disc ${disc}</h2>` : '') + `<div class="rows">${rows}</div>`;
@@ -752,6 +835,47 @@ const after = {
       load(b.dataset.id);
     });
     const first = seg.querySelector('button'); if (first) load(first.dataset.id);
+  },
+  upgrades(el) {
+    const post = async (path, body) => {
+      const response = await fetch(path, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `request failed (${response.status})`);
+      return data;
+    };
+    $('#upgrade-form', el).addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const button = event.currentTarget.querySelector('button[type=submit]');
+      button.disabled = true;
+      try {
+        const values = Object.fromEntries(new FormData(event.currentTarget));
+        values.maxAttempts = Number(values.maxAttempts);
+        await post('/api/upgrades', values);
+        notice('Added to the archive and FLAC queue');
+        show();
+      } catch (err) {
+        notice(err.message, true);
+      } finally {
+        button.disabled = false;
+      }
+    });
+    el.addEventListener('click', async (event) => {
+      const button = event.target.closest('[data-upgrade-retry], [data-upgrade-cancel]');
+      if (!button) return;
+      button.disabled = true;
+      const retry = button.hasAttribute('data-upgrade-retry');
+      const id = Number(button.dataset.upgradeRetry ?? button.dataset.upgradeCancel);
+      try {
+        await post(`/api/upgrades/${retry ? 'retry' : 'cancel'}`, { id });
+        notice(retry ? 'Retry queued now' : 'Upgrade cancelled');
+        show();
+      } catch (err) {
+        notice(err.message, true);
+        button.disabled = false;
+      }
+    });
   },
   top(el) {
     const mode = $('#mode', el), rseg = $('#rseg', el), pseg = $('#pseg', el), out = $('#topOut', el);
@@ -887,6 +1011,18 @@ const after = {
           <div class="sub">${esc(x.artist_name ?? '')}</div><i class="sharebar" style="--w:${Math.round((x.plays / bMax) * 100)}%"></i></div>
           <div class="end">${x.plays}×</div></div>`;
 
+      let cum = 0;
+      const curvePts = t.plays ? d.topTracks.map((x) => {
+        cum += x.plays;
+        return { name: x.track_name, pct: (cum / t.plays) * 100 };
+      }) : [];
+      const halfIdx = curvePts.findIndex((p) => p.pct >= 50);
+      const rabbitCard = curvePts.length > 2 ? `<div class="card"><h2>The rabbit hole</h2>
+        <p class="rabbit-line">${halfIdx >= 0
+          ? `Half of everything you played is just <b>${halfIdx + 1} track${halfIdx ? 's' : ''}</b>.`
+          : `Certified explorer — your top ${curvePts.length} tracks are only <b>${curvePts.at(-1).pct.toFixed(0)}%</b> of your plays.`}</p>
+        ${rabbitChart(curvePts, halfIdx)}</div>` : '';
+
       out.innerHTML = `
         ${podium(d.topArtists.slice(0, 3).map((a) => ({
           href: a.artist_id ? `#artist/${a.artist_id}` : null,
@@ -896,8 +1032,8 @@ const after = {
         })))}
         <div class="tiles">${tiles}</div>
         ${insightCards ? `<div class="insights">${insightCards}</div>` : ''}
-        <div class="card wide" style="margin-bottom:1rem"><h2>Plays per month</h2>${monthChart(d.perMonth, 'plays')}</div>
         <div class="cards">
+          ${rabbitCard}
           <div class="card"><h2>Top artists</h2><div class="rows">${d.topArtists.slice(3).map(artistRow).join('')}</div></div>
           <div class="card"><h2>Top tracks</h2><div class="rows">${d.topTracks.map(trackRow2).join('')}</div></div>
           <div class="card"><h2>Top albums</h2><div class="rows">${d.topAlbums.map(albumRow).join('')}</div></div>
@@ -944,7 +1080,7 @@ const after = {
   },
 };
 
-const TABS = { overview: 'Overview', artists: 'Artists', liked: 'Songs', albums: 'Albums', playlists: 'Playlists', top: 'Top', shows: 'Shows', plays: 'Plays' };
+const TABS = { overview: 'Overview', artists: 'Artists', liked: 'Songs', albums: 'Albums', playlists: 'Playlists', top: 'Top', shows: 'Shows', upgrades: 'FLAC queue', plays: 'Plays' };
 const TAB_ICONS = {
   overview: '<svg viewBox="0 0 24 24"><path d="M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4zm10 0h6v6h-6z"/></svg>',
   artists: '<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>',
@@ -953,17 +1089,41 @@ const TAB_ICONS = {
   playlists: '<svg viewBox="0 0 24 24"><path d="M4 6h11M4 11h11M4 16h7M18 14v6m-3-3h6"/></svg>',
   top: '<svg viewBox="0 0 24 24"><path d="m12 3 2.7 5.5 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/></svg>',
   shows: '<svg viewBox="0 0 24 24"><path d="M6 3v18M18 3v18M6 7h12M6 17h12"/><path d="M10 11h4v2h-4z"/></svg>',
+  upgrades: '<svg viewBox="0 0 24 24"><path d="M4 17h3l2-10 3 13 3-9 2 6h3"/><path d="m16 6 2-2 2 2M18 4v6"/></svg>',
   plays: '<svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8"/><path d="M4 3v5h5"/><path d="m10 9 5 3-5 3z"/></svg>',
 };
 const PAGE_COPY = {
   overview: ['Your listening memory', 'The collection'], artists: ['Everyone in your orbit', 'Artists'],
   liked: ['Saved, remembered, searchable', 'Songs'], albums: ['The record shelf', 'Albums'],
   playlists: ['Your hand-built paths', 'Playlists'], top: ['Listening, counted honestly', 'Your top music'],
-  shows: ['Artists leaving the speakers', 'Upcoming shows'], plays: ['The latest signals', 'Recently played'],
+  shows: ['Artists leaving the speakers', 'Upcoming shows'], upgrades: ['Lossless, eventually', 'FLAC upgrade queue'],
+  plays: ['The latest signals', 'Recently played'],
 };
 const nav = $('#nav');
 nav.innerHTML = Object.entries(TABS).map(([k, v]) => `<button data-t="${k}">${TAB_ICONS[k]}<span>${v}</span></button>`).join('');
 nav.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) location.hash = b.dataset.t; });
+
+// A one-click upgrade control follows every Spotify-backed track row. The
+// server resolves whether a local MP3 already exists; if it does not, the
+// worker first downloads the Spotify source with spotDL.
+document.addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-upgrade-track]');
+  if (!button || button.disabled) return;
+  button.disabled = true;
+  try {
+    const response = await fetch('/api/upgrades', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ trackId: button.dataset.upgradeTrack, maxAttempts: 6 }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `request failed (${response.status})`);
+    button.classList.add('queued');
+    notice(data.job.status === 'already_lossless' ? 'This track is already lossless' : 'FLAC upgrade queued');
+  } catch (err) {
+    notice(err.message, true);
+    button.disabled = false;
+  }
+});
 
 // Skeleton rows shown only when a view takes noticeably long to arrive —
 // cached views paint before the timer fires and never flash it.

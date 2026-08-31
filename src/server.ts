@@ -1,15 +1,14 @@
-// Read-only web UI over the taste DB. Zero deps: node:http + node:sqlite.
-// The DB is opened per request (read-only) so the exporter writing in the
-// same volume never fights a long-lived reader snapshot.
+// Web UI over the read-only taste DB plus small, separate mutable stores for
+// player history and the lossless-upgrade queue. Zero runtime dependencies.
 import http from 'node:http';
 import path from 'node:path';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { Readable } from 'node:stream';
 import { JellyfinBridge, type TasteTrack } from './jellyfin.ts';
 import { LyricsService } from './lyrics.ts';
 import { APP_PLAYS_FILE, PlaysStore } from './plays.ts';
-import { existsSync } from 'node:fs';
+import { UpgradeStore, type UpgradeJob, validWorkerToken } from './upgrades.ts';
 
 const ROOT = path.join(import.meta.dirname, '..');
 const DB_FILE = process.env.SPOTIFY_DB ?? path.join(ROOT, 'data', 'spotify.db');
@@ -25,6 +24,12 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 const jellyfin = new JellyfinBridge();
 const lyrics = new LyricsService();
 const appPlays = new PlaysStore();
+const upgrades = new UpgradeStore();
+const UPGRADE_WORKER_TOKEN = process.env.UPGRADE_WORKER_TOKEN ?? '';
+const SOURCE_HOSTS = new Set([
+  'open.spotify.com', 'spotify.link',
+  'youtube.com', 'www.youtube.com', 'music.youtube.com', 'youtu.be', 'www.youtu.be',
+]);
 
 // Followed, or with at least one still-liked track — the artists that are
 // actually part of the taste. The raw `artists` table also holds every
@@ -61,6 +66,48 @@ function tasteTrack(id: string): TasteTrack | null {
              WHERE ta.track_id = t.id) AS artists
     FROM tracks t LEFT JOIN albums al ON al.id = t.album_id
     WHERE t.id = ?`, id)[0] as TasteTrack | undefined) ?? null;
+}
+
+function publicUpgrade(job: UpgradeJob): Omit<UpgradeJob, 'claim_token' | 'current_path'> {
+  const { claim_token: _claimToken, current_path: _currentPath, ...safe } = job;
+  return safe;
+}
+
+function validSourceUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && SOURCE_HOSTS.has(url.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+async function readJson(req: http.IncomingMessage, maxBytes = 32_000): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length;
+    if (size > maxBytes) throw new Error('request body is too large');
+    chunks.push(chunk as Buffer);
+  }
+  try {
+    const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+    if (!body || Array.isArray(body) || typeof body !== 'object') throw new Error();
+    return body as Record<string, unknown>;
+  } catch {
+    throw new Error('request body must be a JSON object');
+  }
+}
+
+function workerAuthorized(req: http.IncomingMessage): boolean {
+  const bearer = String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
+  const supplied = bearer || String(req.headers['x-upgrade-token'] ?? '');
+  return validWorkerToken(UPGRADE_WORKER_TOKEN, supplied);
+}
+
+function json(res: http.ServerResponse, status: number, body: unknown, extra: Record<string, string> = {}): void {
+  res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...extra });
+  res.end(JSON.stringify(body));
 }
 
 // The Lidarr download-state tables are written by an external poller
@@ -554,6 +601,135 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', 'http://localhost');
   try {
+    if (url.pathname === '/api/upgrades') {
+      if (req.method === 'GET') {
+        const result = upgrades.list(Number(url.searchParams.get('limit') ?? 250));
+        json(res, 200, { ...result, jobs: result.jobs.map(publicUpgrade) });
+        return;
+      }
+      if (req.method !== 'POST') {
+        json(res, 405, { error: 'method not allowed' }, { allow: 'GET, POST' });
+        return;
+      }
+      try {
+        const body = await readJson(req);
+        const suppliedUrl = String(body.sourceUrl ?? '').trim();
+        const explicitTrackId = String(body.trackId ?? '').trim();
+        let trackId = explicitTrackId;
+        if (!trackId && suppliedUrl) {
+          try {
+            const source = new URL(suppliedUrl);
+            const spotifyTrack = source.hostname === 'open.spotify.com'
+              ? source.pathname.match(/^\/(?:intl-[a-z]{2}\/)?track\/([A-Za-z0-9]+)/i)
+              : null;
+            if (spotifyTrack) trackId = spotifyTrack[1];
+          } catch { /* validSourceUrl below returns the useful error */ }
+        }
+        let track = trackId ? tasteTrack(trackId) : null;
+        if (explicitTrackId && !track) {
+          json(res, 404, { error: 'track is not in the taste database' });
+          return;
+        }
+        // A pasted Spotify URL can identify a known taste-db track without
+        // asking for metadata. For a genuinely new Spotify track, fall back
+        // to the manual artist/title fields instead of rejecting the URL.
+        if (!explicitTrackId && trackId && !track) trackId = '';
+        const sourceUrl = suppliedUrl || (trackId ? `https://open.spotify.com/track/${trackId}` : '');
+        if (!validSourceUrl(sourceUrl)) {
+          json(res, 422, { error: 'sourceUrl must be an https Spotify or YouTube URL' });
+          return;
+        }
+        const downloader = String(body.downloader ?? 'auto');
+        if (!['auto', 'yt-dlp', 'spotdl'].includes(downloader)) {
+          json(res, 422, { error: 'downloader must be auto, yt-dlp, or spotdl' });
+          return;
+        }
+
+        // If Jellyfin already has the track, skip the lossy intake download
+        // and search for a lossless replacement directly. A cold/offline
+        // archive simply falls back to the source-download phase.
+        let match = null;
+        if (track) {
+          try { match = await jellyfin.match(track); } catch { /* archive asleep or unconfigured */ }
+        }
+        const created = upgrades.create({
+          trackId: track?.id ?? null,
+          sourceUrl,
+          downloader: downloader as 'auto' | 'yt-dlp' | 'spotdl',
+          artist: track?.artists ?? String(body.artist ?? ''),
+          title: track?.name ?? String(body.title ?? ''),
+          album: track?.album ?? String(body.album ?? ''),
+          durationMs: track?.duration_ms ?? (Number(body.durationMs ?? 0) || null),
+          currentPath: match?.path ?? null,
+          currentCodec: match?.container ?? null,
+          maxAttempts: Number(body.maxAttempts ?? 6),
+        });
+        json(res, 201, { job: publicUpgrade(created) });
+      } catch (err) {
+        const message = (err as Error).message;
+        json(res, /already in the active/.test(message) ? 409 : 422, { error: message });
+      }
+      return;
+    }
+    if (url.pathname === '/api/upgrades/retry' || url.pathname === '/api/upgrades/cancel') {
+      if (req.method !== 'POST') {
+        json(res, 405, { error: 'method not allowed' }, { allow: 'POST' });
+        return;
+      }
+      try {
+        const body = await readJson(req);
+        const id = Number(body.id);
+        if (!Number.isInteger(id) || id < 1) throw new Error('a valid job id is required');
+        const job = url.pathname.endsWith('/retry') ? upgrades.retry(id) : upgrades.cancel(id);
+        json(res, 200, { job: publicUpgrade(job) });
+      } catch (err) {
+        json(res, 409, { error: (err as Error).message });
+      }
+      return;
+    }
+    if (url.pathname === '/api/upgrades/claim' || url.pathname === '/api/upgrades/complete') {
+      if (!UPGRADE_WORKER_TOKEN) {
+        json(res, 503, { error: 'upgrade worker token is not configured' });
+        return;
+      }
+      if (!workerAuthorized(req)) {
+        json(res, 401, { error: 'invalid worker token' });
+        return;
+      }
+      if (req.method !== 'POST') {
+        json(res, 405, { error: 'method not allowed' }, { allow: 'POST' });
+        return;
+      }
+      try {
+        const body = await readJson(req);
+        if (url.pathname.endsWith('/claim')) {
+          const job = upgrades.claim(String(body.workerId ?? ''), Number(body.leaseSeconds ?? 7_200));
+          json(res, 200, { job });
+          return;
+        }
+        const outcome = String(body.outcome ?? '');
+        if (!['source_ready', 'upgraded', 'already_lossless', 'failed'].includes(outcome)) {
+          throw new Error('invalid completion outcome');
+        }
+        const job = upgrades.finish({
+          id: Number(body.id),
+          claimToken: String(body.claimToken ?? ''),
+          outcome: outcome as 'source_ready' | 'upgraded' | 'already_lossless' | 'failed',
+          error: body.error == null ? null : String(body.error),
+          candidate: body.candidate == null ? null : String(body.candidate),
+          currentPath: body.currentPath == null ? null : String(body.currentPath),
+          currentCodec: body.currentCodec == null ? null : String(body.currentCodec),
+          resultPath: body.resultPath == null ? null : String(body.resultPath),
+        });
+        if (outcome === 'source_ready' || outcome === 'upgraded') {
+          void jellyfin.refreshLibrary().catch((err) => console.error('Jellyfin refresh:', (err as Error).message));
+        }
+        json(res, 200, { job: publicUpgrade(job) });
+      } catch (err) {
+        json(res, 409, { error: (err as Error).message });
+      }
+      return;
+    }
     if (url.pathname === '/api/player/wake') {
       if (req.method !== 'POST') {
         res.writeHead(405, { allow: 'POST', 'content-type': 'application/json' });

@@ -62,6 +62,9 @@ services:
       MUSIC_SOURCE_HOST: "192.168.2.34"
       MUSIC_SOURCE_PORT: "2049"
       ELIOT_WAKE_URL: "http://192.168.2.23:7777/wake"
+      # Shared only with eliot's one-shot music-upgrader worker. Browser
+      # queue/create endpoints never receive it; claim/complete require it.
+      UPGRADE_WORKER_TOKEN: "${UPGRADE_WORKER_TOKEN:-}"
     volumes:
       - .:/app
     # Bound to the Pi's LAN IP so Lidarr on eliot can pull /api/lidarr-list

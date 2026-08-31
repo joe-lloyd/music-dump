@@ -93,7 +93,7 @@ test('indexes Jellyfin audio, matches safely, and forwards range requests', asyn
         TotalRecordCount: 2,
         Items: [
           { Id: 'wrong', Name: track.name, Album: 'Elsewhere', Artists: ['Someone Else'], RunTimeTicks: 1_800_000_000 },
-          { Id: 'right', Name: track.name, Album: track.album, Artists: [track.artists], RunTimeTicks: 2_520_000_000, IndexNumber: 3, ParentIndexNumber: 1, Container: 'flac' },
+          { Id: 'right', Name: track.name, Album: track.album, Artists: [track.artists], RunTimeTicks: 2_520_000_000, IndexNumber: 3, ParentIndexNumber: 1, Container: 'flac', Path: '/eliot-media/music/Local Signals/track.flac' },
         ],
       }));
       return;
@@ -120,6 +120,7 @@ test('indexes Jellyfin audio, matches safely, and forwards range requests', asyn
     const match = await bridge.match(track);
     assert.equal(match?.itemId, 'right');
     assert.equal(match?.container, 'flac');
+    assert.equal(match?.path, '/eliot-media/music/Local Signals/track.flac');
     const response = await bridge.stream(match!.itemId, 'bytes=0-3');
     assert.equal(response.status, 206);
     assert.equal(seenRange, 'bytes=0-3');

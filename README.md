@@ -109,6 +109,38 @@ to seek, and a per-track ±0.5 s nudge (persisted in the browser) corrects
 drifting timing. Plain lyrics render without fake timing; instrumentals and
 no-matches stay quiet.
 
+## MP3 intake and automatic FLAC upgrades
+
+The **FLAC queue** tab closes the gap between "I want this song now" and "a
+verified lossless copy exists somewhere":
+
+1. Queue any Spotify-backed track with its small `FLAC up` control, or paste a
+   Spotify/YouTube URL in the FLAC queue. Known Spotify tracks supply their own
+   artist/title/album metadata; new links require artist + title.
+2. The app writes the request to `data/upgrades.db`, separate from the
+   exporter-owned `spotify.db`. Queue claims use leases, so a worker crash does
+   not strand an item in `working` forever.
+3. The scheduled worker on `eliot` downloads an initial MP3 with spotDL (Spotify)
+   or yt-dlp (YouTube) if Jellyfin does not already have a local file. It then
+   searches Soulseek through slskd for FLAC candidates.
+4. A replacement is accepted only when ffprobe confirms the codec is actually
+   FLAC and duration + artist + title match. The FLAC is copied and verified on
+   the library filesystem before the old lossy file is moved to the recoverable
+   `music-upgrade/replaced/` area. The app then asks Jellyfin to rescan.
+
+Upgrade failures retry with exponential backoff (six hours up to seven days),
++/-25% jitter, and a random pick among due failures. `maxAttempts` defaults to 6
+and is capped at 20. Attempted Soulseek files are remembered so a bad candidate
+is not selected repeatedly. Exhausted items stay visible and **Retry now** grants
+another attempt. Source downloads have their own three-attempt budget.
+
+Worker mutation endpoints (`/api/upgrades/claim` and `/api/upgrades/complete`)
+require a shared random `UPGRADE_WORKER_TOKEN` of at least 16 characters. Queue
+creation never exposes that token to the browser. Source URLs are restricted to
+HTTPS Spotify and YouTube hosts and all downloader commands use argument arrays,
+not a shell. See the HomeLab repository's `eliot/acquisition/music-upgrader/`
+for the worker, slskd container, systemd timer, and deployment checklist.
+
 ## Local playback through Jellyfin
 
 The browser never receives the Jellyfin API key. `src/jellyfin.ts` indexes
@@ -136,6 +168,13 @@ at `192.168.2.34:2049`, and the existing wake endpoint at
 `JELLYFIN_USER_ID`, `MUSIC_SOURCE_HOST`, `MUSIC_SOURCE_PORT`, or
 `ELIOT_WAKE_URL` when needed. `JELLYFIN_API_KEY_FILE` is also supported when a
 mounted secret file is preferable to an environment variable.
+
+For the FLAC worker, add the same random token used on eliot to this checkout's
+gitignored `.env`:
+
+```sh
+UPGRADE_WORKER_TOKEN=<at-least-16-random-characters>
+```
 
 For local UI work without a Spotify account or production database:
 
