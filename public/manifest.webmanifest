@@ -1,0 +1,14 @@
+{
+  "name": "Music Taste",
+  "short_name": "Music",
+  "description": "Your private listening history, local music archive, and player.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#080a09",
+  "theme_color": "#080a09",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}

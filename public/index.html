@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#080a09">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><circle cx='12' cy='12' r='11' fill='%23101410'/><circle cx='12' cy='12' r='4.6' fill='%23d9ff57'/><circle cx='12' cy='12' r='1.7' fill='%23101410'/></svg>">
+<link rel="manifest" href="/manifest.webmanifest">
 <meta name="description" content="Your private listening history, local music archive, and player.">
 <title>Music Taste</title>
 <style>
@@ -116,6 +117,7 @@
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to collection</a>
+<div class="loader" id="loader" aria-hidden="true"></div>
 <div class="ambient ambient-one"></div>
 <div class="ambient ambient-two"></div>
 <div class="app-shell">
@@ -253,6 +255,22 @@ const badges = (row) => chips([
   row.unfollowed_at && !row.is_followed ? chip(`unfollowed ${day(row.unfollowed_at)}`) : '',
   row.unsaved_at && !row.is_saved ? chip(`unsaved ${day(row.unsaved_at)}`) : '',
 ].filter(Boolean));
+
+// Every fetch on the page (views, pager, player, lyrics) drives the slim
+// top loader, so "still talking to the server" is always visible.
+{
+  const loader = $('#loader');
+  let inflight = 0;
+  const bare = window.fetch.bind(window);
+  window.fetch = (...args) => {
+    inflight += 1;
+    loader.classList.add('on');
+    const settle = () => { inflight -= 1; if (!inflight) loader.classList.remove('on'); };
+    const request = bare(...args);
+    request.then(settle, settle);
+    return request;
+  };
+}
 
 const cache = {};
 async function api(p) { return cache[p] ??= await (await fetch(p)).json(); }
@@ -739,7 +757,13 @@ const nav = $('#nav');
 nav.innerHTML = Object.entries(TABS).map(([k, v]) => `<button data-t="${k}">${TAB_ICONS[k]}<span>${v}</span></button>`).join('');
 nav.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) location.hash = b.dataset.t; });
 
+// Skeleton rows shown only when a view takes noticeably long to arrive —
+// cached views paint before the timer fires and never flash it.
+const SKELETON = `<div class="skeleton">${'<div class="skeleton-row"><span></span><span></span></div>'.repeat(9)}</div>`;
+
+let showGen = 0;
 async function show() {
+  const gen = ++showGen;
   const hash = location.hash.slice(1);
   const detail = hash.match(/^(artist|album)\/([A-Za-z0-9]+)$/);
   const tab = detail ? null : (TABS[hash] ? hash : 'overview');
@@ -748,20 +772,23 @@ async function show() {
   $('#page-kicker').textContent = copy[0];
   $('#page-title').textContent = copy[1];
   const main = $('#main');
+  const skeletonTimer = setTimeout(() => { if (gen === showGen) { main.innerHTML = SKELETON; scrollTo(0, 0); } }, 90);
   try {
-    if (detail) {
-      main.innerHTML = await views[detail[1]](detail[2]);
-    } else {
-      main.innerHTML = await views[tab]();
-      after[tab]?.(main);
-    }
+    const html = await (detail ? views[detail[1]](detail[2]) : views[tab]());
+    clearTimeout(skeletonTimer);
+    if (gen !== showGen) return; // a newer navigation superseded this one
+    main.innerHTML = html;
+    if (!detail) after[tab]?.(main);
     scrollTo(0, 0);
     main.querySelectorAll('[data-tip]').forEach((el) => tipOn(el, el.dataset.tip));
   } catch (err) {
+    clearTimeout(skeletonTimer);
+    if (gen !== showGen) return;
     main.innerHTML = `<div class="empty">${esc(err.message)} — is the database there yet?</div>`;
   }
 }
 addEventListener('hashchange', show);
+navigator.serviceWorker?.register('/sw.js').catch(() => { /* http or old browser: install-less is fine */ });
 
 api('/api/stats')
   .then((s) => { $('#sync').textContent = s.lastSync ? `last sync ${ago(s.lastSync)}` : 'first sync pending'; })

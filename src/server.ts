@@ -16,6 +16,9 @@ const INDEX = path.join(ROOT, 'public', 'index.html');
 const STATIC_FILES: Record<string, { file: string; type: string }> = {
   '/app.css': { file: path.join(ROOT, 'public', 'app.css'), type: 'text/css; charset=utf-8' },
   '/player.js': { file: path.join(ROOT, 'public', 'player.js'), type: 'text/javascript; charset=utf-8' },
+  '/sw.js': { file: path.join(ROOT, 'public', 'sw.js'), type: 'text/javascript; charset=utf-8' },
+  '/manifest.webmanifest': { file: path.join(ROOT, 'public', 'manifest.webmanifest'), type: 'application/manifest+json' },
+  '/icon.svg': { file: path.join(ROOT, 'public', 'icon.svg'), type: 'image/svg+xml' },
 };
 const jellyfin = new JellyfinBridge();
 const lyrics = new LyricsService();
