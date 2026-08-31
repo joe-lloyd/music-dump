@@ -359,3 +359,33 @@ test('imported artists are tracked for Lidarr, with misses cached and retried', 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a parked or cancelled job can be resumed, a finished one cannot', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'retry-'));
+  const store = new UpgradeStore(path.join(dir, 'upgrades.db'));
+  try {
+    const job = store.create({
+      sourceUrl: 'https://youtu.be/abc', downloader: 'yt-dlp', sourceMode: 'single',
+      artist: 'Emissary', title: 'like clockwork', album: 'self-titled',
+    });
+    const claimed = store.claim('eliot')!;
+    store.finish({
+      id: job.id, claimToken: claimed.claim_token!, outcome: 'source_ready',
+      currentPath: '/data/library/music/_Singles/Emissary/like clockwork.opus',
+      currentCodec: 'opus',
+    });
+    // The worker declines by policy while Soulseek is off...
+    const working = store.claim('eliot')!;
+    store.finish({ id: job.id, claimToken: working.claim_token!, outcome: 'parked' });
+    assert.equal(store.get(job.id)!.status, 'cancelled');
+    assert.equal(store.get(job.id)!.upgrade_attempts, 0, 'parking burns no attempt');
+
+    // ...and turning Soulseek back on must be able to resume it.
+    const resumed = store.retry(job.id);
+    assert.equal(resumed.status, 'queued');
+    assert.equal(resumed.phase, 'upgrade');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

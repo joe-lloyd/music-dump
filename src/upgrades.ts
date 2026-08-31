@@ -495,6 +495,7 @@ export class UpgradeStore {
       }
 
       let status: UpgradeStatus;
+      let refundAttempt = false;
       let phase = job.phase;
       let nextAttempt: string | null = null;
       let error = input.error?.trim().slice(0, 2_000) || null;
@@ -513,10 +514,13 @@ export class UpgradeStore {
         status = 'already_lossless';
         error = null;
       } else if (input.outcome === 'parked') {
-        // The worker declined the job by policy (e.g. Soulseek disabled),
-        // which is not a failure: no attempt is burned, and a retry from the
-        // UI resumes it once the capability is switched back on.
+        // The worker declined the job by policy (e.g. Soulseek disabled).
+        // The counter is incremented at CLAIM time, so refund it here -
+        // otherwise merely being offered to a worker that declines silently
+        // eats the retry budget, and six sweeps would exhaust a job that was
+        // never actually tried.
         status = 'cancelled';
+        refundAttempt = true;
       } else {
         if (!error) error = 'worker reported an unspecified failure';
         const attempts = job.phase === 'source' ? job.source_attempts : job.upgrade_attempts;
@@ -550,6 +554,12 @@ export class UpgradeStore {
         at,
         job.id,
       );
+      if (refundAttempt) {
+        const counter = job.phase === 'source' ? 'source_attempts' : 'upgrade_attempts';
+        this.db.prepare(
+          `UPDATE upgrade_queue SET ${counter} = MAX(0, ${counter} - 1) WHERE id = ?`,
+        ).run(job.id);
+      }
       this.db.prepare(`
         UPDATE upgrade_attempts
         SET finished_at = ?, outcome = ?, error = ?, candidate = ?
@@ -637,7 +647,11 @@ export class UpgradeStore {
     const job = this.get(id);
     if (!job) throw new Error('upgrade job not found');
     if (job.status === 'working') throw new Error('an active worker owns this job');
-    if (job.status === 'upgraded' || job.status === 'already_lossless' || job.status === 'cancelled') {
+    // 'cancelled' IS retryable: that is what parking means. A job the worker
+    // declined by policy (Soulseek disabled) or that you cancelled by hand
+    // must be resumable, otherwise cancelling is silently destructive and the
+    // Retry button on those rows can never work.
+    if (job.status === 'upgraded' || job.status === 'already_lossless') {
       throw new Error(`cannot retry a ${job.status} job`);
     }
     const at = nowIso(this.now);
