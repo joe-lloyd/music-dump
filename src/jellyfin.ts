@@ -302,10 +302,22 @@ export class JellyfinBridge {
     return plain ? { synced: null, plain } : null;
   }
 
-  async stream(itemId: string, range?: string): Promise<Response> {
+  async stream(itemId: string, range?: string, signal?: AbortSignal): Promise<Response> {
     const headers: Record<string, string> = {};
     if (range) headers.Range = range;
-    return this.request(`/Audio/${encodeURIComponent(itemId)}/stream?static=true`, { headers, signal: AbortSignal.timeout(30_000) });
+    // Time-limit only the wait for response headers. A plain
+    // AbortSignal.timeout also cancels the response BODY, which cut every
+    // stream dead 30 seconds in while the browser was still pulling audio.
+    // After headers arrive the body streams for as long as the caller's
+    // signal (the browser connection) stays open.
+    const controller = new AbortController();
+    const connectTimer = setTimeout(() => controller.abort(new Error('Jellyfin took too long to start the stream')), 15_000);
+    signal?.addEventListener('abort', () => controller.abort(), { once: true });
+    try {
+      return await this.request(`/Audio/${encodeURIComponent(itemId)}/stream?static=true`, { headers, signal: controller.signal });
+    } finally {
+      clearTimeout(connectTimer);
+    }
   }
 
   async wake(): Promise<void> {

@@ -433,7 +433,11 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(404, { 'content-type': 'text/plain' }).end('track not matched in Jellyfin');
         return;
       }
-      const upstream = await jellyfin.stream(match.itemId, req.headers.range);
+      // Tie the upstream fetch to the browser connection: pause/disconnect
+      // cancels the Jellyfin read instead of leaking it until file end.
+      const clientGone = new AbortController();
+      res.on('close', () => clientGone.abort());
+      const upstream = await jellyfin.stream(match.itemId, req.headers.range, clientGone.signal);
       const headers: Record<string, string> = { 'cache-control': 'private, no-store' };
       for (const name of ['accept-ranges', 'content-length', 'content-range', 'content-type', 'etag', 'last-modified']) {
         const value = upstream.headers.get(name);
@@ -444,7 +448,11 @@ const server = http.createServer(async (req, res) => {
         res.end();
         return;
       }
-      Readable.fromWeb(upstream.body as never).pipe(res);
+      const body = Readable.fromWeb(upstream.body as never);
+      // A mid-stream upstream failure (NFS hiccup, our own abort) must drop
+      // the response, not crash the process via an unhandled 'error'.
+      body.on('error', () => res.destroy());
+      body.pipe(res);
       return;
     }
     const handler = api[url.pathname];

@@ -694,6 +694,10 @@ label.chk input { accent-color: var(--accent); }
   border-bottom: 1px solid var(--line);
   border-radius: 9px;
   transition: background .14s ease;
+  /* The library views render every row; let the browser skip layout and
+     paint for the thousands that are off screen. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 54px;
 }
 
 .row:hover { background: rgba(255, 255, 255, .025); }
