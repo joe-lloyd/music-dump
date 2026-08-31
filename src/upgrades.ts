@@ -120,6 +120,30 @@ export function validWorkerToken(configured: string, supplied: string): boolean 
  * outside spotify.db: the exporter owns that database, while this is mutable
  * application state with a different backup/retention lifecycle.
  */
+export interface LocalTrack {
+  id: string;            // "local:<queue id>"
+  album_id: string;      // "local-album:<slug>"
+  name: string;
+  album: string;
+  artists: string;
+  duration_ms: number | null;
+  track_number: number | null;
+  codec: string | null;
+  path: string;          // worker-side path, e.g. /data/library/music/...
+  added_at: string;
+}
+
+// Stable per (artist, album) so an album keeps one id across imports.
+export function localAlbumId(artist: string, album: string): string {
+  const slug = `${artist}~${album}`
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9~]+/g, '-')
+    .replace(/^-|-$/g, '');
+  return `local-album:${slug}`;
+}
+
 export class UpgradeStore {
   readonly db: DatabaseSync;
   private readonly now: () => number;
@@ -281,6 +305,35 @@ export class UpgradeStore {
       }
       throw err;
     }
+  }
+
+  // Every row that installed a file is part of the local library, whatever
+  // became of its lossless upgrade afterwards. A cancelled or exhausted
+  // upgrade still leaves a perfectly good MP3 on disk, so membership keys
+  // off current_path, never off status.
+  localTracks(): LocalTrack[] {
+    return this.db.prepare(`
+      SELECT id, artist, title, album, duration_ms, track_number, current_path, current_codec, created_at
+      FROM upgrade_queue
+      WHERE current_path IS NOT NULL AND current_path <> ''
+      ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE, track_number, id
+    `).all().map((row) => {
+      const r = row as Record<string, unknown>;
+      const artist = String(r.artist ?? '');
+      const album = String(r.album ?? '') || String(r.title ?? '');
+      return {
+        id: `local:${r.id}`,
+        album_id: localAlbumId(artist, album),
+        name: String(r.title ?? ''),
+        album,
+        artists: artist,
+        duration_ms: r.duration_ms == null ? null : Number(r.duration_ms),
+        track_number: r.track_number == null ? null : Number(r.track_number),
+        codec: (r.current_codec as string) ?? null,
+        path: String(r.current_path ?? ''),
+        added_at: String(r.created_at ?? ''),
+      };
+    });
   }
 
   get(id: number): UpgradeJob | null {

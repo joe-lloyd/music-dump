@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
-import { UpgradeStore, isLosslessCodec, validWorkerToken } from './upgrades.ts';
+import { UpgradeStore, isLosslessCodec, localAlbumId, validWorkerToken } from './upgrades.ts';
 
 function fixture() {
   const dir = mkdtempSync(path.join(tmpdir(), 'upgrades-'));
@@ -248,5 +248,47 @@ test('deduplicates active tracks and compares configured worker tokens safely', 
     assert.equal(validWorkerToken('short', 'short'), false);
   } finally {
     f.close();
+  }
+});
+
+test('installed files become local library tracks and albums, whatever the upgrade did', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'local-'));
+  const store = new UpgradeStore(path.join(dir, 'upgrades.db'));
+  try {
+    const parent = store.create({
+      sourceUrl: 'https://youtu.be/abc123', downloader: 'yt-dlp', sourceMode: 'chapters',
+      artist: 'Igorrr and Ruby My Dear', title: 'Maigre', album: 'Maigre',
+    });
+    const claimed = store.claim('eliot')!;
+    const { children } = store.finishBatch({
+      id: parent.id, claimToken: claimed.claim_token!,
+      resultPath: '/data/library/music/_YouTube/Igorrr and Ruby My Dear/Maigre',
+      tracks: [
+        { artist: 'Igorrr and Ruby My Dear', title: 'Barbecue', album: 'Maigre', trackNumber: 1,
+          currentPath: '/data/library/music/_YouTube/Igorrr and Ruby My Dear/Maigre/01 - Barbecue.mp3',
+          currentCodec: 'mp3', durationMs: 180_000 },
+        { artist: 'Igorrr and Ruby My Dear', title: 'Cuisse', album: 'Maigre', trackNumber: 2,
+          currentPath: '/data/library/music/_YouTube/Igorrr and Ruby My Dear/Maigre/02 - Cuisse.mp3',
+          currentCodec: 'mp3', durationMs: 200_000 },
+      ],
+    });
+    assert.equal(children.length, 2);
+
+    // A cancelled upgrade must NOT remove the file from the library: the MP3
+    // is still on disk and still playable.
+    store.cancel(children[0].id);
+
+    const local = store.localTracks();
+    assert.equal(local.length, 2, 'both installed tracks remain local library members');
+    assert.equal(local[0].name, 'Barbecue');
+    assert.equal(local[0].album, 'Maigre');
+    assert.equal(local[0].track_number, 1);
+    assert.match(local[0].id, /^local:\d+$/);
+    assert.equal(local[0].album_id, local[1].album_id, 'same album shares one id');
+    assert.equal(local[0].album_id, localAlbumId('Igorrr and Ruby My Dear', 'Maigre'));
+    assert.ok(local[0].path.endsWith('01 - Barbecue.mp3'));
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });

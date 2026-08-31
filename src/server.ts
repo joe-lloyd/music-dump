@@ -9,7 +9,8 @@ import { JellyfinBridge, type TasteTrack } from './jellyfin.ts';
 import { LyricsService } from './lyrics.ts';
 import { APP_PLAYS_FILE, PlaysStore } from './plays.ts';
 import {
-  UpgradeStore, type BatchTrack, type SourceMode, type UpgradeJob, validWorkerToken,
+  UpgradeStore, localAlbumId, type BatchTrack, type LocalTrack, type SourceMode,
+  type UpgradeJob, validWorkerToken,
 } from './upgrades.ts';
 
 const ROOT = path.join(import.meta.dirname, '..');
@@ -59,7 +60,65 @@ function query(sql: string, ...args: (string | number)[]): unknown[] {
   }
 }
 
+const LOCAL_TRACK_PREFIX = 'local:';
+const LOCAL_ALBUM_PREFIX = 'local-album:';
+
+// Music that came in through the app itself (YouTube / Spotify-link intake)
+// has no Spotify identity, so it lives in the upgrade store rather than the
+// taste DB. It is still just music: these helpers give it the same shape as
+// a Spotify track so every existing surface - albums, player, lyrics, plays
+// - can carry it without a parallel code path.
+function localAsTasteTrack(track: LocalTrack): TasteTrack {
+  return {
+    id: track.id,
+    name: track.name,
+    album_id: track.album_id,
+    album: track.album,
+    artists: track.artists,
+    duration_ms: track.duration_ms,
+    disc_number: null,
+    track_number: track.track_number,
+    image_url: null,
+  };
+}
+
+function localTrack(id: string): LocalTrack | null {
+  if (!id.startsWith(LOCAL_TRACK_PREFIX)) return null;
+  return upgrades.localTracks().find((track) => track.id === id) ?? null;
+}
+
+// Local files resolve by the exact path the worker installed them to, never
+// by title matching: Jellyfin may not have probed their tags yet, and an
+// exact path can never resolve to the wrong recording.
+async function resolveMatch(track: TasteTrack) {
+  const local = localTrack(track.id);
+  if (local) return jellyfin.matchPath(local.path);
+  return jellyfin.match(track);
+}
+
+function localAlbums(): { id: string; name: string; artists: string; total_tracks: number; added_at: string }[] {
+  const albums = new Map<string, { id: string; name: string; artists: string; total_tracks: number; added_at: string }>();
+  for (const track of upgrades.localTracks()) {
+    const existing = albums.get(track.album_id);
+    if (existing) {
+      existing.total_tracks += 1;
+      if (track.added_at < existing.added_at) existing.added_at = track.added_at;
+    } else {
+      albums.set(track.album_id, {
+        id: track.album_id,
+        name: track.album,
+        artists: track.artists,
+        total_tracks: 1,
+        added_at: track.added_at,
+      });
+    }
+  }
+  return [...albums.values()].sort((a, b) => b.added_at.localeCompare(a.added_at));
+}
+
 function tasteTrack(id: string): TasteTrack | null {
+  const local = localTrack(id);
+  if (local) return localAsTasteTrack(local);
   return (query(`
     SELECT t.id, t.name, t.album_id, t.duration_ms, t.disc_number, t.track_number,
            al.name AS album, al.image_url,
@@ -163,7 +222,7 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
     if (status.state !== 'ready') {
       return { available: false, reason: status.state, detail: status.detail, wakeAvailable: status.wakeAvailable };
     }
-    const match = await jellyfin.match(track);
+    const match = await resolveMatch(track);
     if (!match) {
       return {
         available: false,
@@ -389,6 +448,37 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
 
   '/api/album': (params) => {
     const id = params.get('id') ?? '';
+    if (id.startsWith(LOCAL_ALBUM_PREFIX)) {
+      const tracks = upgrades.localTracks().filter((track) => track.album_id === id);
+      if (!tracks.length) return { album: null, artists: [], tracks: [] };
+      const first = tracks[0];
+      return {
+        album: {
+          id,
+          name: first.album,
+          album_type: 'local',
+          release_date: (first.added_at || '').slice(0, 10),
+          image_url: null,
+          total_tracks: tracks.length,
+          is_saved: 1,
+          downloaded: 1,
+          local: 1,
+        },
+        // No Spotify artist id to link to, so the name carries it.
+        artists: [{ id: null, name: first.artists }],
+        tracks: tracks.map((track) => ({
+          id: track.id,
+          name: track.name,
+          disc_number: 1,
+          track_number: track.track_number,
+          duration_ms: track.duration_ms,
+          explicit: 0,
+          artists: track.artists,
+          liked: 0,
+          local: 1,
+        })),
+      };
+    }
     return {
       album: query(`SELECT al.*,
                (SELECT downloaded FROM album_download_status ds WHERE ds.album_id = al.id) AS downloaded
@@ -417,7 +507,26 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
     LEFT JOIN albums al ON al.id = t.album_id
     ORDER BY lt.added_at DESC`),
 
-  '/api/albums': () => query(`
+  '/api/albums': () => [
+    // Locally imported albums are real music in the library, so they belong
+    // in the same grid as saved Spotify albums - flagged downloaded, because
+    // by definition the file is already on disk.
+    ...localAlbums().map((album) => ({
+      id: album.id,
+      name: album.name,
+      artists: album.artists,
+      album_type: 'local',
+      release_date: (album.added_at || '').slice(0, 10),
+      image_url: null,
+      saved_at: album.added_at,
+      total_tracks: album.total_tracks,
+      is_saved: 1,
+      unsaved_at: null,
+      removed_at: null,
+      downloaded: 1,
+      local: 1,
+    })),
+    ...query(`
     SELECT al.id, al.name, al.album_type, al.release_date, al.label, al.popularity,
            al.image_url, al.saved_at, al.total_tracks, al.is_saved, al.unsaved_at, al.removed_at,
            (SELECT downloaded FROM album_download_status ds WHERE ds.album_id = al.id) AS downloaded,
@@ -425,7 +534,8 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
               FROM album_artists aa JOIN artists a ON a.id = aa.artist_id
              WHERE aa.album_id = al.id) AS artists
     FROM albums al WHERE al.is_saved = 1 OR al.unsaved_at IS NOT NULL
-    ORDER BY al.saved_at DESC`),
+    ORDER BY al.saved_at DESC`) as Record<string, unknown>[],
+  ],
 
   // Everything the discography crawl knows that isn't in the saved section.
   // Server-side paging + search — this grows to thousands of rows.
@@ -671,7 +781,7 @@ const server = http.createServer(async (req, res) => {
         // archive simply falls back to the source-download phase.
         let match = null;
         if (track) {
-          try { match = await jellyfin.match(track); } catch { /* archive asleep or unconfigured */ }
+          try { match = await resolveMatch(track); } catch { /* archive asleep or unconfigured */ }
         }
         const artist = track?.artists ?? String(body.artist ?? '');
         const album = track?.album ?? String(body.album ?? '');
@@ -843,7 +953,7 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(503, { 'content-type': 'text/plain', 'retry-after': '15' }).end('music archive is offline');
         return;
       }
-      const match = await jellyfin.match(track);
+      const match = await resolveMatch(track);
       if (!match) {
         res.writeHead(404, { 'content-type': 'text/plain' }).end('track not matched in Jellyfin');
         return;

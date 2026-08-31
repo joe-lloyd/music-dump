@@ -52,6 +52,10 @@ export interface PlayerStatus {
 }
 
 const INDEX_TTL_MS = 5 * 60 * 1000;
+// The upgrade worker writes paths as it sees them (/data/library/music/...);
+// Jellyfin serves the same files from its own bind (/eliot-media/music/...).
+const LOCAL_LIBRARY_PREFIX = process.env.LOCAL_LIBRARY_PREFIX ?? '/data/library/music';
+const JELLYFIN_LIBRARY_PREFIX = process.env.JELLYFIN_LIBRARY_PREFIX ?? '/eliot-media/music';
 
 export function normalizeMusicText(value: string | null | undefined): string {
   return String(value ?? '')
@@ -144,6 +148,7 @@ export class JellyfinBridge {
   private readonly sourcePort = Number(process.env.MUSIC_SOURCE_PORT ?? 2049);
   private readonly wakeUrl = process.env.ELIOT_WAKE_URL ?? '';
   private byName = new Map<string, JellyfinAudioItem[]>();
+  private byPath = new Map<string, JellyfinAudioItem>();
   private itemCount = 0;
   private indexedAt = 0;
   private refreshPromise: Promise<void> | null = null;
@@ -199,8 +204,10 @@ export class JellyfinBridge {
       const response = await this.request(`/Items?${params}`, { signal: AbortSignal.timeout(90_000) });
       const data = await response.json() as JellyfinItemsResponse;
       const next = new Map<string, JellyfinAudioItem[]>();
+      const nextPaths = new Map<string, JellyfinAudioItem>();
       for (const raw of data.Items ?? []) {
         if (!raw.Id || !raw.Name) continue;
+        if (raw.Path) nextPaths.set(raw.Path.replace(/\\/g, '/'), raw);
         const item = deriveFromFilename(raw);
         const key = normalizeMusicText(item.Name);
         const bucket = next.get(key) ?? [];
@@ -208,6 +215,7 @@ export class JellyfinBridge {
         next.set(key, bucket);
       }
       this.byName = next;
+      this.byPath = nextPaths;
       this.itemCount = data.TotalRecordCount ?? data.Items?.length ?? 0;
       this.indexedAt = Date.now();
     })().finally(() => { this.refreshPromise = null; });
@@ -229,6 +237,33 @@ export class JellyfinBridge {
       path: ranked[0].item.Path ?? null,
       score: ranked[0].score,
     };
+  }
+
+  // Locally imported files (YouTube intake) have no Spotify identity, and
+  // Jellyfin may not have probed their tags yet, so title/artist matching is
+  // useless for them. We know exactly where the worker installed each one,
+  // so resolve by path: exact, and it can never pick the wrong recording.
+  matchPathLoaded(workerPath: string): PlayerMatch | null {
+    const normalized = String(workerPath ?? '').replace(/\\/g, '/');
+    if (!normalized) return null;
+    const candidates = [normalized];
+    if (normalized.startsWith(LOCAL_LIBRARY_PREFIX)) {
+      candidates.push(JELLYFIN_LIBRARY_PREFIX + normalized.slice(LOCAL_LIBRARY_PREFIX.length));
+    }
+    for (const candidate of candidates) {
+      const item = this.byPath.get(candidate);
+      if (item) return { itemId: item.Id, container: item.Container ?? null, path: item.Path ?? null, score: 100 };
+    }
+    return null;
+  }
+
+  async matchPath(workerPath: string): Promise<PlayerMatch | null> {
+    try {
+      await this.refresh();
+    } catch (err) {
+      if (!this.indexedAt) throw err;
+    }
+    return this.matchPathLoaded(workerPath);
   }
 
   async match(track: TasteTrack): Promise<PlayerMatch | null> {
