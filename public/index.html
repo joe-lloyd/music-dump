@@ -3,7 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>taste-db</title>
+<meta name="theme-color" content="#080a09">
+<meta name="description" content="Your private listening history, local music archive, and player.">
+<title>Music Taste</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -109,11 +111,87 @@
   .seg button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
   .heart { color: var(--accent); flex: none; width: 1.1em; text-align: center; }
 </style>
+<link rel="stylesheet" href="/app.css">
 </head>
 <body>
-<header><h1><a href="#overview">🎧 taste-db</a></h1><div id="sync"></div></header>
-<nav id="nav"></nav>
-<main id="main"><div class="empty">loading…</div></main>
+<a class="skip-link" href="#main">Skip to collection</a>
+<div class="ambient ambient-one"></div>
+<div class="ambient ambient-two"></div>
+<div class="app-shell">
+  <aside class="sidebar">
+    <header class="brand-head">
+      <a class="brand" href="#overview" aria-label="Music Taste home">
+        <span class="brand-mark" aria-hidden="true"><span></span></span>
+        <span><b>Music Taste</b><small>Private archive</small></span>
+      </a>
+    </header>
+    <nav id="nav" aria-label="Library"></nav>
+    <div class="sidebar-foot">
+      <div class="archive-state" id="archive-state" data-state="checking">
+        <span class="state-dot" aria-hidden="true"></span>
+        <span><b id="archive-label">Checking archive</b><small id="archive-detail">Jellyfin connection</small></span>
+      </div>
+      <div id="sync"></div>
+    </div>
+  </aside>
+  <section class="content-shell">
+    <header class="page-head">
+      <div>
+        <span class="page-kicker" id="page-kicker">Your listening memory</span>
+        <h1 id="page-title">The collection</h1>
+      </div>
+      <button class="wake-button" id="wake-button" type="button" hidden>Wake eliot</button>
+    </header>
+    <main id="main" tabindex="-1"><div class="empty">Loading your archive…</div></main>
+  </section>
+</div>
+
+<section class="player-bar" id="player-bar" data-state="idle" aria-label="Music player">
+  <audio id="audio" preload="metadata"></audio>
+  <div class="player-track">
+    <div class="player-art"><img id="player-art" alt=""><span id="player-art-fallback">MT</span></div>
+    <div class="player-copy">
+      <span class="player-overline" id="player-overline">Local archive</span>
+      <b id="player-title">Choose a track</b>
+      <span id="player-byline">Play from your downloaded collection</span>
+    </div>
+  </div>
+  <div class="player-transport">
+    <div class="player-controls">
+      <button class="player-icon" id="previous-button" type="button" aria-label="Previous track">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h2v14H6zm3 7 9-7v14z"/></svg>
+      </button>
+      <button class="player-play" id="player-play" type="button" aria-label="Play" disabled>
+        <svg class="play-shape" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z"/></svg>
+        <svg class="pause-shape" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h4v14H7zm6 0h4v14h-4z"/></svg>
+      </button>
+      <button class="player-icon" id="next-button" type="button" aria-label="Next track">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 5h2v14h-2zM6 5l9 7-9 7z"/></svg>
+      </button>
+    </div>
+    <div class="scrubber-row">
+      <span id="elapsed">0:00</span>
+      <input id="scrubber" type="range" min="0" max="1000" value="0" aria-label="Track position" disabled>
+      <span id="remaining">−0:00</span>
+    </div>
+  </div>
+  <div class="player-actions">
+    <button class="queue-button" id="queue-button" type="button" aria-expanded="false" aria-controls="queue-panel">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h12M4 11h12M4 16h8M18 14v6m-3-3h6"/></svg>
+      <span id="queue-count">0</span>
+    </button>
+    <label class="volume-control">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5 6 9H2v6h4l5 4zM15 9a4 4 0 0 1 0 6m2-9a8 8 0 0 1 0 12"/></svg>
+      <input id="volume" type="range" min="0" max="1" step="0.01" value="0.72" aria-label="Volume">
+    </label>
+  </div>
+</section>
+
+<aside class="queue-panel" id="queue-panel" aria-label="Play queue" hidden>
+  <div class="queue-head"><div><span>Next up</span><b>Your queue</b></div><button id="queue-close" type="button" aria-label="Close queue">×</button></div>
+  <div id="queue-list" class="queue-list"></div>
+</aside>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 <div id="tip"></div>
 
 <script>
@@ -137,6 +215,8 @@ function imgErr(el) {
 // Download glyph (down-arrow into a tray) + the overlay badge for downloaded albums.
 const DL = '<svg viewBox="0 0 24 24" width="1em" height="1em" aria-hidden="true"><path fill="currentColor" d="M11 3h2v8h3l-4 4-4-4h3z"/><path fill="currentColor" d="M5 19h14v2H5z"/></svg>';
 const dlBadge = `<span class="dl" title="downloaded in the library">${DL}</span>`;
+const PLAY = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z"/></svg>';
+const playControl = (track) => track.id ? `<button class="track-play" type="button" data-track-id="${esc(track.id)}" data-track-name="${esc(track.name)}" data-track-artists="${esc(track.artists ?? track.artist_name ?? '')}" data-track-duration="${Number(track.duration_ms ?? 0)}" aria-label="Play ${esc(track.name)}">${PLAY}</button>` : '';
 const pic = (kind, id, cdnUrl, name, overlay = '') => `
   <div class="pic">
     <img src="${id ? `/img/${kind}/${esc(id)}.jpg` : ''}" alt="" loading="lazy"
@@ -224,7 +304,8 @@ const groupHead = (al) => `
     </div>
   </div>`;
 const slimRow = (t, endText) => `
-  <div class="row${t.removed_at ? ' gone' : ''}" style="margin-left:3rem">
+  <div class="row slim-row${t.removed_at ? ' gone' : ''}">
+    ${playControl(t)}
     <span class="heart">${t.liked || (t.added_at && !t.removed_at) ? '♥' : ''}</span>
     <div class="mid"><div>${esc(t.name)} ${t.removed_at ? chip(`un-liked ${day(t.removed_at)}`, true) : ''}</div></div>
     <div class="end">${endText ?? dur(t.duration_ms)}</div>
@@ -239,6 +320,7 @@ const trackRow = (t, endText, rank) => {
   const albumHref = t.album_id ? `#album/${t.album_id}` : null;
   return `
   <div class="row${gone ? ' gone' : ''}">${rank != null ? `<span class="rank">${rank}</span>` : ''}
+    ${playControl(t)}
     ${albumHref ? `<a href="${albumHref}">` : ''}${pic('albums', t.album_id, t.image_url, t.album ?? t.name)}${albumHref ? '</a>' : ''}
     <div class="mid">
       <div>${esc(t.name)} ${gone ? chip(`removed ${day(gone)}`, true) : ''}</div>
@@ -280,14 +362,22 @@ const views = {
       .map(([k, v]) => `<div class="tile"><b>${v}</b><span>${k}</span></div>`).join('');
     // Albums actually in the download library (from the Lidarr sync). Leads the
     // row, accent-coloured, with the ⤓ icon and a freshness stamp.
-    const dlTile = `<div class="tile"><b style="color:var(--accent)">${DL} ${(c.downloaded ?? 0).toLocaleString()}</b>` +
+    const dlTile = `<div class="tile download-tile"><b>${DL} ${(c.downloaded ?? 0).toLocaleString()}</b>` +
       `<span>albums downloaded${s.downloadsSyncedAt ? ` · ${ago(s.downloadsSyncedAt)}` : ''}</span></div>`;
     const gmax = Math.max(...s.genres.map((g) => g.n), 1);
     const gbars = s.genres.map((g) => `
       <div class="lbl">${esc(g.genre)}</div>
       <div class="bar" style="width:${Math.round((g.n / gmax) * 100)}%" data-tip="${esc(g.genre)} · ${g.n} liked tracks"></div>
       <div class="n">${g.n}</div>`).join('');
-    return `<div class="tiles">${dlTile}${tiles}</div>
+    return `<section class="overview-hero">
+        <div>
+          <span class="eyebrow">Local listening archive</span>
+          <h2>The songs that stayed, <em>ready to play.</em></h2>
+          <p>Spotify remembers the signals. Your local archive keeps the records. Music Taste brings both sides together without pretending a file exists when it does not.</p>
+        </div>
+        <aside class="hero-signal"><span>Downloaded now</span><b>${Number(c.downloaded ?? 0).toLocaleString()} albums</b><small>${s.downloadsSyncedAt ? `Library checked ${ago(s.downloadsSyncedAt)}` : 'Waiting for the first Lidarr library snapshot'}</small></aside>
+      </section>
+      <div class="tiles">${dlTile}${tiles}</div>
       <div class="cards">
         <div class="card"><h2>Liked songs added per month</h2>${monthChart(s.likedPerMonth)}</div>
         <div class="card"><h2>Top genres (by liked tracks)</h2>
@@ -410,6 +500,7 @@ const views = {
       const rows = d.tracks.filter((t) => (t.disc_number ?? 1) === disc).map((t) => `
         <div class="row">
           <span class="rank">${t.track_number ?? ''}</span>
+          ${playControl(t)}
           <span class="heart">${t.liked ? '♥' : ''}</span>
           <div class="mid"><div>${esc(t.name)}</div>
             <div class="sub">${esc(t.artists ?? '')}</div></div>
@@ -425,7 +516,10 @@ const views = {
           <div class="meta">${artistLinks}</div>
           <div class="meta">${meta}</div>
           ${badges(al)}
-          ${spbtn('album', al.id)}
+          <div class="hero-actions">
+            ${al.downloaded && d.tracks.length ? `<button class="primary-action play-album" type="button">${PLAY} Play album</button>` : ''}
+            ${spbtn('album', al.id)}
+          </div>
         </div>
       </div>
       <h2>Tracks${d.tracks.length ? ` (${d.tracks.length} in library)` : ''}</h2>
@@ -551,6 +645,7 @@ const after = {
           <div class="end">${a.plays}×</div></div>`;
       const trackRow2 = (x, i) => `
         <div class="row"><span class="rank">${i + 1}</span>
+          ${playControl({ id: x.id, name: x.track_name, artist_name: x.artist_name, duration_ms: x.ms })}
           <div class="mid"><div>${esc(x.track_name)}</div><div class="sub">${esc(x.artist_name ?? '')}</div></div>
           <div class="end">${x.plays}×</div>${x.id ? spotify('track', x.id) : ''}</div>`;
       const albumRow = (x, i) => `
@@ -607,8 +702,24 @@ const after = {
 };
 
 const TABS = { overview: 'Overview', artists: 'Artists', liked: 'Songs', albums: 'Albums', playlists: 'Playlists', top: 'Top', shows: 'Shows', plays: 'Plays' };
+const TAB_ICONS = {
+  overview: '<svg viewBox="0 0 24 24"><path d="M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4zm10 0h6v6h-6z"/></svg>',
+  artists: '<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>',
+  liked: '<svg viewBox="0 0 24 24"><path d="M9 18V5l10-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/></svg>',
+  albums: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2"/><path d="M12 3v3"/></svg>',
+  playlists: '<svg viewBox="0 0 24 24"><path d="M4 6h11M4 11h11M4 16h7M18 14v6m-3-3h6"/></svg>',
+  top: '<svg viewBox="0 0 24 24"><path d="m12 3 2.7 5.5 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/></svg>',
+  shows: '<svg viewBox="0 0 24 24"><path d="M6 3v18M18 3v18M6 7h12M6 17h12"/><path d="M10 11h4v2h-4z"/></svg>',
+  plays: '<svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8"/><path d="M4 3v5h5"/><path d="m10 9 5 3-5 3z"/></svg>',
+};
+const PAGE_COPY = {
+  overview: ['Your listening memory', 'The collection'], artists: ['Everyone in your orbit', 'Artists'],
+  liked: ['Saved, remembered, searchable', 'Songs'], albums: ['The record shelf', 'Albums'],
+  playlists: ['Your hand-built paths', 'Playlists'], top: ['Listening, counted honestly', 'Your top music'],
+  shows: ['Artists leaving the speakers', 'Upcoming shows'], plays: ['The latest signals', 'Recently played'],
+};
 const nav = $('#nav');
-nav.innerHTML = Object.entries(TABS).map(([k, v]) => `<button data-t="${k}">${v}</button>`).join('');
+nav.innerHTML = Object.entries(TABS).map(([k, v]) => `<button data-t="${k}">${TAB_ICONS[k]}<span>${v}</span></button>`).join('');
 nav.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) location.hash = b.dataset.t; });
 
 async function show() {
@@ -616,6 +727,9 @@ async function show() {
   const detail = hash.match(/^(artist|album)\/([A-Za-z0-9]+)$/);
   const tab = detail ? null : (TABS[hash] ? hash : 'overview');
   nav.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.t === tab));
+  const copy = detail ? [detail[1] === 'artist' ? 'Artist in your archive' : 'Release in your archive', detail[1] === 'artist' ? 'Artist' : 'Album'] : PAGE_COPY[tab];
+  $('#page-kicker').textContent = copy[0];
+  $('#page-title').textContent = copy[1];
   const main = $('#main');
   try {
     if (detail) {
@@ -637,5 +751,6 @@ api('/api/stats')
   .catch(() => { $('#sync').textContent = 'db not ready'; });
 show();
 </script>
+<script src="/player.js"></script>
 </body>
 </html>

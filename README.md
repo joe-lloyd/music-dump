@@ -90,6 +90,46 @@ exporter. Locally: `node src/server.ts` → <http://localhost:8080>. On the
 homelab: **<https://music.home.arpa>** (Caddy → `spotify-taste-db-web:8080`
 over `homelab-net`).
 
+The UI is dark-first and includes a persistent bottom player, queue, seeking,
+volume, and Media Session controls. Playback controls resolve against the local
+Jellyfin library; an item that is merely known to Spotify is never presented as
+successfully playable.
+
+## Local playback through Jellyfin
+
+The browser never receives the Jellyfin API key. `src/jellyfin.ts` indexes
+Jellyfin audio server-side, matches a Spotify track on normalized title plus a
+scored combination of artist, album, duration, disc, and track number, and
+proxies range-aware audio through `/api/player/stream`. Low-confidence and tied
+matches are rejected rather than playing the wrong recording.
+
+Playback remains visibly unconfigured until the R0 Jellyfin music-library
+handoff exists and an API key is supplied. On the Pi:
+
+1. Create a Jellyfin API key named `music-taste` in the Jellyfin dashboard.
+2. Add it to the deployed checkout's gitignored `.env`:
+
+   ```sh
+   printf 'JELLYFIN_API_KEY=%s\n' 'paste-key-here' >> .env
+   chmod 600 .env
+   ```
+
+3. Recreate only the web container: `docker compose up -d --force-recreate web`.
+
+The compose defaults expect Jellyfin at `http://jellyfin:8096`, the music source
+at `192.168.2.34:2049`, and the existing wake endpoint at
+`http://192.168.2.23:7777/wake`. Override `JELLYFIN_URL`,
+`JELLYFIN_USER_ID`, `MUSIC_SOURCE_HOST`, `MUSIC_SOURCE_PORT`, or
+`ELIOT_WAKE_URL` when needed. `JELLYFIN_API_KEY_FILE` is also supported when a
+mounted secret file is preferable to an environment variable.
+
+For local UI work without a Spotify account or production database:
+
+```sh
+npm run fixture
+SPOTIFY_DB=./data/dev-fixture.db node src/server.ts
+```
+
 ## Deployment (pi-server)
 
 Runs on `pi-server` (192.168.2.23) as two containers from one compose file —

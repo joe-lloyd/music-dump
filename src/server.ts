@@ -5,11 +5,18 @@ import http from 'node:http';
 import path from 'node:path';
 import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
+import { Readable } from 'node:stream';
+import { JellyfinBridge, type TasteTrack } from './jellyfin.ts';
 
 const ROOT = path.join(import.meta.dirname, '..');
 const DB_FILE = process.env.SPOTIFY_DB ?? path.join(ROOT, 'data', 'spotify.db');
 const PORT = Number(process.env.PORT ?? 8080);
 const INDEX = path.join(ROOT, 'public', 'index.html');
+const STATIC_FILES: Record<string, { file: string; type: string }> = {
+  '/app.css': { file: path.join(ROOT, 'public', 'app.css'), type: 'text/css; charset=utf-8' },
+  '/player.js': { file: path.join(ROOT, 'public', 'player.js'), type: 'text/javascript; charset=utf-8' },
+};
+const jellyfin = new JellyfinBridge();
 
 function query(sql: string, ...args: (string | number)[]): unknown[] {
   const db = new DatabaseSync(DB_FILE, { readOnly: true });
@@ -18,6 +25,17 @@ function query(sql: string, ...args: (string | number)[]): unknown[] {
   } finally {
     db.close();
   }
+}
+
+function tasteTrack(id: string): TasteTrack | null {
+  return (query(`
+    SELECT t.id, t.name, t.album_id, t.duration_ms, t.disc_number, t.track_number,
+           al.name AS album, al.image_url,
+           (SELECT group_concat(a.name, ', ' ORDER BY ta.position)
+              FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
+             WHERE ta.track_id = t.id) AS artists
+    FROM tracks t LEFT JOIN albums al ON al.id = t.album_id
+    WHERE t.id = ?`, id)[0] as TasteTrack | undefined) ?? null;
 }
 
 // The Lidarr download-state tables are written by an external poller
@@ -46,7 +64,33 @@ function ensureLidarrTables(): void {
   }
 }
 
-const api: Record<string, (params: URLSearchParams) => unknown> = {
+const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown>> = {
+  '/api/player/status': (params) => jellyfin.status(params.get('refresh') === '1'),
+
+  '/api/player/resolve': async (params) => {
+    const track = tasteTrack(params.get('id') ?? '');
+    if (!track) return { available: false, reason: 'unknown-track', detail: 'This track is not in the taste database' };
+    const status = await jellyfin.status();
+    if (status.state !== 'ready') {
+      return { available: false, reason: status.state, detail: status.detail, wakeAvailable: status.wakeAvailable };
+    }
+    const match = await jellyfin.match(track);
+    if (!match) {
+      return {
+        available: false,
+        reason: 'not-matched',
+        detail: 'No confident match was found in the local Jellyfin library',
+        track,
+      };
+    }
+    return {
+      available: true,
+      streamUrl: `/api/player/stream?id=${encodeURIComponent(track.id)}`,
+      confidence: match.score,
+      track,
+    };
+  },
+
   '/api/stats': () => {
     const one = (sql: string) => (query(sql)[0] as Record<string, unknown>) ?? {};
     return {
@@ -347,14 +391,59 @@ const api: Record<string, (params: URLSearchParams) => unknown> = {
     ORDER BY p.played_at DESC LIMIT 300`),
 };
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', 'http://localhost');
   try {
+    if (url.pathname === '/api/player/wake') {
+      if (req.method !== 'POST') {
+        res.writeHead(405, { allow: 'POST', 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'method not allowed' }));
+        return;
+      }
+      await jellyfin.wake();
+      res.writeHead(202, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      res.end(JSON.stringify({ accepted: true }));
+      return;
+    }
+    if (url.pathname === '/api/player/stream') {
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        res.writeHead(405, { allow: 'GET, HEAD' }).end();
+        return;
+      }
+      const track = tasteTrack(url.searchParams.get('id') ?? '');
+      if (!track) {
+        res.writeHead(404, { 'content-type': 'text/plain' }).end('unknown track');
+        return;
+      }
+      const online = await jellyfin.sourceOnline();
+      if (online === false) {
+        res.writeHead(503, { 'content-type': 'text/plain', 'retry-after': '15' }).end('music archive is offline');
+        return;
+      }
+      const match = await jellyfin.match(track);
+      if (!match) {
+        res.writeHead(404, { 'content-type': 'text/plain' }).end('track not matched in Jellyfin');
+        return;
+      }
+      const upstream = await jellyfin.stream(match.itemId, req.headers.range);
+      const headers: Record<string, string> = { 'cache-control': 'private, no-store' };
+      for (const name of ['accept-ranges', 'content-length', 'content-range', 'content-type', 'etag', 'last-modified']) {
+        const value = upstream.headers.get(name);
+        if (value) headers[name] = value;
+      }
+      res.writeHead(upstream.status, headers);
+      if (req.method === 'HEAD' || !upstream.body) {
+        res.end();
+        return;
+      }
+      Readable.fromWeb(upstream.body as never).pipe(res);
+      return;
+    }
     const handler = api[url.pathname];
     if (handler) {
       // Serialize BEFORE writeHead — a handler that throws mid-write would
       // otherwise crash the process with ERR_HTTP_HEADERS_SENT.
-      const body = JSON.stringify(handler(url.searchParams));
+      const body = JSON.stringify(await handler(url.searchParams));
       res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
       res.end(body);
       return;
@@ -362,6 +451,12 @@ const server = http.createServer((req, res) => {
     if (url.pathname === '/' || url.pathname === '/index.html') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       res.end(readFileSync(INDEX));
+      return;
+    }
+    const staticFile = STATIC_FILES[url.pathname];
+    if (staticFile) {
+      res.writeHead(200, { 'content-type': staticFile.type, 'cache-control': 'no-cache' });
+      res.end(readFileSync(staticFile.file));
       return;
     }
     // Locally archived cover art (survives content being pulled from Spotify).

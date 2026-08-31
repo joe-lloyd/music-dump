@@ -54,6 +54,14 @@ services:
     environment:
       TZ: "Europe/Amsterdam"
       EVENT_COUNTRIES: "NL,BE,DE"
+      # Playback stays disabled until JELLYFIN_API_KEY is added to the Pi's
+      # gitignored .env. The key is consumed only by this server-side bridge;
+      # browser stream URLs never contain it.
+      JELLYFIN_URL: "http://jellyfin:8096"
+      JELLYFIN_API_KEY: "${JELLYFIN_API_KEY:-}"
+      MUSIC_SOURCE_HOST: "192.168.2.34"
+      MUSIC_SOURCE_PORT: "2049"
+      ELIOT_WAKE_URL: "http://192.168.2.23:7777/wake"
     volumes:
       - .:/app
     # Bound to the Pi's LAN IP so Lidarr on eliot can pull /api/lidarr-list
