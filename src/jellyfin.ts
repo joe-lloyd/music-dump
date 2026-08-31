@@ -1,5 +1,6 @@
 import net from 'node:net';
 import { readFileSync } from 'node:fs';
+import { splitWordTags } from './lyrics.ts';
 
 export interface TasteTrack {
   id: string;
@@ -299,7 +300,13 @@ export class JellyfinBridge {
     const lines = data.Lyrics ?? [];
     const timed = lines.filter((line) => typeof line.Start === 'number');
     if (timed.length > 1) {
-      return { synced: timed.map((line) => ({ time: (line.Start as number) / 10_000_000, text: (line.Text ?? '').trim() })), plain: null };
+      return {
+        synced: timed.map((line) => {
+          const { text, words } = splitWordTags((line.Text ?? '').trim());
+          return { time: (line.Start as number) / 10_000_000, text, ...(words ? { words } : {}) };
+        }),
+        plain: null,
+      };
     }
     const plain = lines.map((line) => line.Text ?? '').join('\n').trim();
     return plain ? { synced: null, plain } : null;

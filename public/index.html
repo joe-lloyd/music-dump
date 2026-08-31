@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#080a09">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><circle cx='12' cy='12' r='11' fill='%23101410'/><circle cx='12' cy='12' r='4.6' fill='%23d9ff57'/><circle cx='12' cy='12' r='1.7' fill='%23101410'/></svg>">
+<meta name="theme-color" content="#0a080a">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><circle cx='12' cy='12' r='11' fill='%23141014'/><circle cx='12' cy='12' r='4.6' fill='%23ff57d9'/><circle cx='12' cy='12' r='1.7' fill='%23141014'/></svg>">
 <link rel="manifest" href="/manifest.webmanifest">
 <meta name="description" content="Your private listening history, local music archive, and player.">
 <title>Music Taste</title>
@@ -245,6 +245,9 @@ const pic = (kind, id, cdnUrl, name, overlay = '') => `
   </div>`;
 const spotify = (type, id) => `<a class="ext" href="https://open.spotify.com/${type}/${id}" target="_blank" rel="noopener" title="open in Spotify">↗</a>`;
 const spbtn = (type, id) => `<a class="spbtn" href="https://open.spotify.com/${type}/${id}" target="_blank" rel="noopener">Open in Spotify ↗</a>`;
+// Legal lossless: Bandcamp search deep-link (item_type a = albums, b = artists).
+const bcbtn = (query, type = 'a', label = 'Find on Bandcamp ↗') =>
+  `<a class="spbtn" href="https://bandcamp.com/search?q=${encodeURIComponent(query)}&item_type=${type}" target="_blank" rel="noopener">${label}</a>`;
 const genres = (json, n = 3) => { try { return JSON.parse(json ?? '[]').slice(0, n); } catch { return []; } };
 const chips = (list) => list.length ? `<div class="chips">${list.join('')}</div>` : '';
 const chip = (text, bad = false) => `<span class="chip${bad ? ' bad' : ''}">${esc(text)}</span>`;
@@ -510,7 +513,7 @@ const views = {
           ${badges(a)}
           ${gchips(a.genres, 8)}
           <div class="meta">${meta}</div>
-          ${spbtn('artist', a.id)}
+          ${spbtn('artist', a.id)} ${bcbtn(a.name, 'b')}
         </div>
       </div>
       ${d.events?.length ? `<h2>Upcoming shows</h2><div class="rows">${d.events.map((e) => eventRow({ ...e, artist_name: a.name, image_url: a.image_url })).join('')}</div>` : ''}
@@ -554,6 +557,7 @@ const views = {
           <div class="hero-actions">
             ${al.downloaded && d.tracks.length ? `<button class="primary-action play-album" type="button">${PLAY} Play album</button>` : ''}
             ${spbtn('album', al.id)}
+            ${bcbtn(`${d.artists[0]?.name ?? ''} ${al.name}`.trim(), 'a', al.downloaded ? 'Bandcamp ↗' : 'Get the FLAC on Bandcamp ↗')}
           </div>
         </div>
       </div>

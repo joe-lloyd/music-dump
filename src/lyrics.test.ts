@@ -18,6 +18,18 @@ const noBridge = {
   lyrics: async () => null,
 };
 
+test('parses enhanced-LRC word tags into word timings, and never invents them', () => {
+  const [line] = parseLrc('[00:10.00]<00:10.00>find <00:10.40>the <00:11.00>signal');
+  assert.equal(line.text, 'find the signal');
+  assert.deepEqual(line.words, [
+    { time: 10, text: 'find' },
+    { time: 10.4, text: 'the' },
+    { time: 11, text: 'signal' },
+  ]);
+  const [plainLine] = parseLrc('[00:10.00]no word timing here');
+  assert.equal(plainLine.words, undefined);
+});
+
 test('parses LRC timestamps, repeated tags, and skips metadata lines', () => {
   const lines = parseLrc('[ar:Local Signals]\n[00:12.50]find the signal\n[00:20][01:05.5]in the static\n\n[00:03.250]\n');
   assert.deepEqual(lines, [

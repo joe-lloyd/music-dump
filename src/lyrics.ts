@@ -6,7 +6,7 @@
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export interface LyricLine { time: number; text: string; }
+export interface LyricLine { time: number; text: string; words?: { time: number; text: string }[]; }
 
 export interface LyricsResult {
   available: boolean;
@@ -34,6 +34,26 @@ const USER_AGENT = 'music-taste/1.0 (https://github.com/joe-lloyd/music-dump)';
 
 const NONE: LyricsResult = { available: false, synced: null, plain: null, instrumental: false, source: null };
 
+// Enhanced-LRC word tags — "<mm:ss.xx>word <mm:ss.xx>word" — appear inside a
+// line's content when the source has real word-level timing. Never invented:
+// a line without tags simply has no `words`.
+export function splitWordTags(content: string): { text: string; words: LyricLine['words'] } {
+  const tags = [...content.matchAll(/<(\d+):(\d{1,2})(?:[.:](\d{1,3}))?>/g)];
+  if (tags.length < 2) {
+    return { text: content.replace(/<\d+:\d{1,2}(?:[.:]\d{1,3})?>/g, '').trim(), words: undefined };
+  }
+  const words: NonNullable<LyricLine['words']> = [];
+  for (let i = 0; i < tags.length; i += 1) {
+    const [tag, min, sec, frac] = tags[i];
+    const fraction = frac ? Number(frac) / 10 ** frac.length : 0;
+    const end = i + 1 < tags.length ? tags[i + 1].index : content.length;
+    const text = content.slice((tags[i].index ?? 0) + tag.length, end).trim();
+    if (text) words.push({ time: Number(min) * 60 + Number(sec) + fraction, text });
+  }
+  if (words.length < 2) return { text: words.map((w) => w.text).join(' '), words: undefined };
+  return { text: words.map((w) => w.text).join(' '), words };
+}
+
 // [mm:ss.xx] timestamps, several per line allowed; [ar:], [ti:], … are metadata.
 export function parseLrc(text: string): LyricLine[] {
   const lines: LyricLine[] = [];
@@ -41,9 +61,10 @@ export function parseLrc(text: string): LyricLine[] {
     const tags = [...raw.matchAll(/\[(\d+):(\d{1,2})(?:[.:](\d{1,3}))?\]/g)];
     if (!tags.length) continue;
     const content = raw.slice((tags.at(-1)?.index ?? 0) + tags.at(-1)![0].length).trim();
+    const { text: lineText, words } = splitWordTags(content);
     for (const [, min, sec, frac] of tags) {
       const fraction = frac ? Number(frac) / 10 ** frac.length : 0;
-      lines.push({ time: Number(min) * 60 + Number(sec) + fraction, text: content });
+      lines.push({ time: Number(min) * 60 + Number(sec) + fraction, text: lineText, ...(words ? { words } : {}) });
     }
   }
   return lines.sort((a, b) => a.time - b.time);

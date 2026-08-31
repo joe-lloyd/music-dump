@@ -1,5 +1,13 @@
 (() => {
-  const audio = document.querySelector('#audio');
+  // Two audio elements: the visible one plays, the other pre-buffers the
+  // next queue item so track transitions don't wait on resolve + first
+  // byte. `audio` always points at the active element.
+  const audioA = document.querySelector('#audio');
+  const audioB = new Audio();
+  audioB.preload = 'auto';
+  let audio = audioA;
+  let prefetch = null;
+  const standby = () => (audio === audioA ? audioB : audioA);
   const bar = document.querySelector('#player-bar');
   const playButton = document.querySelector('#player-play');
   const previousButton = document.querySelector('#previous-button');
@@ -44,7 +52,9 @@
   let lyricsTrackId = null;
   let lyricsFetch = 0;
   let activeLyricLine = -1;
+  let activeWordIndex = -1;
   let lyricsScrolledAt = 0;
+  let wordRaf = 0;
 
   const escapeHtml = (value) => String(value ?? '').replace(/[&<>"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[char]));
 
@@ -72,12 +82,12 @@
       const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}');
       queue = Array.isArray(saved.queue) ? saved.queue.filter((item) => item?.id).slice(0, 500) : [];
       queueIndex = Number.isInteger(saved.queueIndex) && saved.queueIndex < queue.length ? saved.queueIndex : -1;
-      audio.volume = Number.isFinite(saved.volume) ? Math.max(0, Math.min(1, saved.volume)) : .72;
+      audioA.volume = audioB.volume = Number.isFinite(saved.volume) ? Math.max(0, Math.min(1, saved.volume)) : .72;
       volume.value = String(audio.volume);
     } catch {
       queue = [];
       queueIndex = -1;
-      audio.volume = .72;
+      audioA.volume = audioB.volume = .72;
     }
   };
 
@@ -172,6 +182,7 @@
     if (index === activeLyricLine && !force) return;
     lyricsBody.querySelector('.lyric-line.on')?.classList.remove('on');
     activeLyricLine = index;
+    activeWordIndex = -1;
     if (index < 0) return;
     const el = lyricsBody.querySelector(`[data-line="${index}"]`);
     if (!el) return;
@@ -179,6 +190,30 @@
     if (Date.now() - lyricsScrolledAt > 4000) {
       lyricsBody.scrollTop = el.offsetTop - lyricsBody.clientHeight / 2 + el.offsetHeight / 2;
     }
+  };
+
+  // Word-by-word highlight, only when the source carried real word timing.
+  // Runs on an animation frame while the panel is open and audio plays —
+  // timeupdate's ~4 Hz cadence is too coarse for word sweeps.
+  const syncWords = () => {
+    const words = lyricsData?.synced?.[activeLyricLine]?.words;
+    if (!words || lyricsPanel.hidden) return;
+    const shift = lyricShift();
+    let index = -1;
+    while (index + 1 < words.length && words[index + 1].time + shift <= audio.currentTime) index += 1;
+    if (index === activeWordIndex) return;
+    const lineEl = lyricsBody.querySelector(`[data-line="${activeLyricLine}"]`);
+    if (!lineEl) return;
+    lineEl.querySelectorAll('.w').forEach((el, i) => el.classList.toggle('sung', i <= index));
+    activeWordIndex = index;
+  };
+
+  const wordLoop = () => {
+    syncWords();
+    wordRaf = (!lyricsPanel.hidden && !audio.paused) ? requestAnimationFrame(wordLoop) : 0;
+  };
+  const ensureWordLoop = () => {
+    if (!wordRaf && !lyricsPanel.hidden && !audio.paused) wordRaf = requestAnimationFrame(wordLoop);
   };
 
   const renderLyrics = () => {
@@ -189,9 +224,14 @@
       lyricsSource.textContent = 'Instrumental';
       lyricsBody.innerHTML = '<div class="empty">An instrumental — nothing to sing along to</div>';
     } else if (data.synced?.length) {
-      lyricsSource.textContent = data.source === 'jellyfin' ? 'Synced · local library' : 'Synced · LRCLIB';
+      const wordly = data.synced.some((line) => line.words?.length);
+      lyricsSource.textContent = (data.source === 'jellyfin' ? 'Synced · local library' : 'Synced · LRCLIB') + (wordly ? ' · word timing' : '');
       lyricsBody.innerHTML = data.synced.map((line, index) =>
-        `<button class="lyric-line" type="button" data-line="${index}">${escapeHtml(line.text) || '♪'}</button>`).join('');
+        `<button class="lyric-line" type="button" data-line="${index}">${
+          line.words?.length
+            ? line.words.map((word, wi) => `<span class="w" data-w="${wi}">${escapeHtml(word.text)}</span>`).join(' ')
+            : (escapeHtml(line.text) || '♪')
+        }</button>`).join('');
       lyricsBody.scrollTop = 0;
       syncLyrics(true);
     } else if (data.plain) {
@@ -243,7 +283,12 @@
     bar.dataset.state = 'error';
     overline.textContent = result.reason === 'archive-offline' ? 'Archive asleep' : 'Unavailable locally';
     title.textContent = result.track?.name || queue[queueIndex]?.name || 'Cannot play this track';
-    byline.textContent = result.detail || 'No local audio source is available';
+    if (result.reason === 'not-matched' && result.track) {
+      const query = encodeURIComponent(`${(result.track.artists || '').split(',')[0]} ${result.track.album || result.track.name}`.trim());
+      byline.innerHTML = `${escapeHtml(result.detail || 'No local file')} · <a href="https://bandcamp.com/search?q=${query}&item_type=a" target="_blank" rel="noopener">Bandcamp ↗</a>`;
+    } else {
+      byline.textContent = result.detail || 'No local audio source is available';
+    }
     wakeButton.hidden = !(result.wakeAvailable && result.reason === 'archive-offline');
     clearLyrics('Lyrics follow local playback');
     notify(result.detail || 'This track is not available in the local archive');
@@ -251,6 +296,7 @@
 
   const playAt = async (index) => {
     if (!queue.length || index < 0 || index >= queue.length) return;
+    prefetch = null;
     audio.pause();
     audio.removeAttribute('src');
     audio.load();
@@ -304,13 +350,58 @@
     }
   };
 
+  // ~20s before a track ends, resolve the next queue item and buffer it in
+  // the standby element; `next` then swaps elements instead of re-fetching.
+  const prefetchNext = async () => {
+    const upNext = queue[queueIndex + 1];
+    if (!upNext || prefetch?.trackId === upNext.id) return;
+    prefetch = { trackId: upNext.id, ready: false, track: null };
+    try {
+      const response = await fetch(`/api/player/resolve?id=${encodeURIComponent(upNext.id)}`);
+      if (prefetch?.trackId !== upNext.id) return;
+      const result = response.ok ? await response.json() : { available: false };
+      if (prefetch?.trackId !== upNext.id || !result.available) return;
+      const el = standby();
+      el.src = result.streamUrl;
+      el.load();
+      prefetch.track = result.track;
+      prefetch.ready = true;
+    } catch { /* fall back to the normal resolve path on ended */ }
+  };
+
   const next = () => {
-    if (queueIndex + 1 < queue.length) playAt(queueIndex + 1);
-    else {
+    const index = queueIndex + 1;
+    if (index >= queue.length) {
       audio.pause();
       audio.currentTime = 0;
       bar.dataset.state = 'paused';
+      return;
     }
+    if (prefetch?.ready && prefetch.trackId === queue[index].id && prefetch.track) {
+      const old = audio;
+      audio = standby();
+      old.pause();
+      old.removeAttribute('src');
+      old.load();
+      queueIndex = index;
+      current = prefetch.track;
+      pendingTrackId = null;
+      prefetch = null;
+      bar.dataset.state = 'loading';
+      title.textContent = current.name;
+      byline.textContent = [current.artists, current.album].filter(Boolean).join(' · ');
+      overline.textContent = 'Local archive · Jellyfin';
+      setArtwork(current);
+      updateMediaSession(current);
+      loadLyrics(current);
+      playButton.disabled = false;
+      scrubber.disabled = false;
+      renderQueue();
+      save();
+      audio.play().catch(() => playAt(index));
+      return;
+    }
+    playAt(index);
   };
 
   const previous = () => {
@@ -329,6 +420,7 @@
     if ('mediaSession' in navigator && navigator.mediaSession.setPositionState && Number.isFinite(duration) && duration > 0) {
       try { navigator.mediaSession.setPositionState({ duration, playbackRate: audio.playbackRate, position: Math.min(audio.currentTime, duration) }); } catch { /* unsupported state */ }
     }
+    if (duration && duration - audio.currentTime < 20 && !audio.paused) prefetchNext();
   };
 
   const refreshStatus = async (force = false) => {
@@ -381,7 +473,7 @@
   scrubber.addEventListener('input', () => {
     if (Number.isFinite(audio.duration)) audio.currentTime = (Number(scrubber.value) / 1000) * audio.duration;
   });
-  volume.addEventListener('input', () => { audio.volume = Number(volume.value); save(); });
+  volume.addEventListener('input', () => { audioA.volume = audioB.volume = Number(volume.value); save(); });
   // The queue and lyrics panels share the same corner — only one at a time.
   queueButton.addEventListener('click', () => {
     queuePanel.hidden = !queuePanel.hidden;
@@ -402,6 +494,7 @@
       queuePanel.hidden = true;
       queueButton.setAttribute('aria-expanded', 'false');
       syncLyrics(true);
+      ensureWordLoop();
     }
   });
   lyricsClose.addEventListener('click', () => {
@@ -446,19 +539,22 @@
     }
   });
 
-  audio.addEventListener('play', () => { bar.dataset.state = 'playing'; if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing'; });
-  audio.addEventListener('pause', () => { if (bar.dataset.state !== 'error') bar.dataset.state = 'paused'; if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused'; });
-  audio.addEventListener('timeupdate', () => { updateProgress(); syncLyrics(); });
-  audio.addEventListener('durationchange', updateProgress);
-  audio.addEventListener('ended', next);
-  audio.addEventListener('error', () => {
-    if (!audio.src) return;
-    bar.dataset.state = 'error';
-    overline.textContent = 'Playback interrupted';
-    byline.textContent = 'The local file could not be streamed';
-    notify('Playback stopped. The archive may have gone offline.');
-    refreshStatus(true);
-  });
+  for (const el of [audioA, audioB]) {
+    el.addEventListener('play', (e) => { if (e.target !== audio) return; bar.dataset.state = 'playing'; ensureWordLoop(); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing'; });
+    el.addEventListener('pause', (e) => { if (e.target !== audio) return; if (bar.dataset.state !== 'error') bar.dataset.state = 'paused'; if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused'; });
+    el.addEventListener('timeupdate', (e) => { if (e.target !== audio) return; updateProgress(); syncLyrics(); });
+    el.addEventListener('durationchange', (e) => { if (e.target === audio) updateProgress(); });
+    el.addEventListener('ended', (e) => { if (e.target === audio) next(); });
+    el.addEventListener('error', (e) => {
+      if (e.target !== audio) { prefetch = null; return; } // a failed pre-buffer just falls back to the resolve path
+      if (!audio.src) return;
+      bar.dataset.state = 'error';
+      overline.textContent = 'Playback interrupted';
+      byline.textContent = 'The local file could not be streamed';
+      notify('Playback stopped. The archive may have gone offline.');
+      refreshStatus(true);
+    });
+  }
 
   if ('mediaSession' in navigator) {
     const handlers = {
