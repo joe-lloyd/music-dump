@@ -1014,7 +1014,7 @@ const server = http.createServer(async (req, res) => {
       if (track) {
         // The worker records its own mount path; this container sees the
         // same tree under APP_LIBRARY_PREFIX.
-        const dir = path.dirname(track.path.replace(/\/g, '/'));
+        const dir = path.dirname(track.path.replace(/\\/g, '/'));
         if (dir.startsWith(LOCAL_LIBRARY_PREFIX)) {
           const local = path.join(APP_LIBRARY_PREFIX, dir.slice(LOCAL_LIBRARY_PREFIX.length));
           for (const name of ['cover.jpg', 'folder.jpg', 'cover.png', 'folder.png']) {
