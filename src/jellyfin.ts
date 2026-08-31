@@ -55,7 +55,7 @@ export interface PlayerStatus {
 const INDEX_TTL_MS = 5 * 60 * 1000;
 // The upgrade worker writes paths as it sees them (/data/library/music/...);
 // Jellyfin serves the same files from its own bind (/eliot-media/music/...).
-const LOCAL_LIBRARY_PREFIX = process.env.LOCAL_LIBRARY_PREFIX ?? '/data/library/music';
+export const LOCAL_LIBRARY_PREFIX = process.env.LOCAL_LIBRARY_PREFIX ?? '/data/library/music';
 const JELLYFIN_LIBRARY_PREFIX = process.env.JELLYFIN_LIBRARY_PREFIX ?? '/eliot-media/music';
 
 export function normalizeMusicText(value: string | null | undefined): string {

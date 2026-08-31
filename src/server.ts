@@ -5,7 +5,7 @@ import path from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { Readable } from 'node:stream';
-import { JellyfinBridge, type TasteTrack } from './jellyfin.ts';
+import { JellyfinBridge, LOCAL_LIBRARY_PREFIX, type TasteTrack } from './jellyfin.ts';
 import { LyricsService } from './lyrics.ts';
 import { APP_PLAYS_FILE, PlaysStore } from './plays.ts';
 import {
@@ -24,6 +24,9 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
   '/manifest.webmanifest': { file: path.join(ROOT, 'public', 'manifest.webmanifest'), type: 'application/manifest+json' },
   '/icon.svg': { file: path.join(ROOT, 'public', 'icon.svg'), type: 'image/svg+xml' },
 };
+// Where this container sees the music library that the worker writes to.
+// Empty disables file-based cover lookup and leaves only the Jellyfin path.
+const APP_LIBRARY_PREFIX = process.env.APP_LIBRARY_PREFIX ?? '/music';
 const jellyfin = new JellyfinBridge();
 const lyrics = new LyricsService();
 const appPlays = new PlaysStore();
@@ -1001,12 +1004,31 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     // Locally archived cover art (survives content being pulled from Spotify).
-    // Locally imported albums have no Spotify artwork; Jellyfin holds the
-    // embedded/folder art, so proxy it under a stable app URL.
+    // Locally imported albums have no Spotify artwork. Prefer the cover file
+    // sitting beside the audio (the intake writes one); fall back to asking
+    // Jellyfin, which extracts embedded art. Jellyfin has proved unreliable
+    // at ingesting folder art over the NFS mount, so the file comes first.
     const localImage = url.pathname.match(/^\/img\/local\/([A-Za-z0-9-]+)\.jpg$/);
     if (localImage) {
       const track = upgrades.localTracks().find((row) => row.album_id === localImage[1]);
       if (track) {
+        // The worker records its own mount path; this container sees the
+        // same tree under APP_LIBRARY_PREFIX.
+        const dir = path.dirname(track.path.replace(/\/g, '/'));
+        if (dir.startsWith(LOCAL_LIBRARY_PREFIX)) {
+          const local = path.join(APP_LIBRARY_PREFIX, dir.slice(LOCAL_LIBRARY_PREFIX.length));
+          for (const name of ['cover.jpg', 'folder.jpg', 'cover.png', 'folder.png']) {
+            try {
+              const body = readFileSync(path.join(local, name));
+              res.writeHead(200, {
+                'content-type': name.endsWith('.png') ? 'image/png' : 'image/jpeg',
+                'cache-control': 'public, max-age=86400',
+              });
+              res.end(body);
+              return;
+            } catch { /* try the next filename */ }
+          }
+        }
         try {
           const match = await jellyfin.matchPath(track.path);
           if (match) {

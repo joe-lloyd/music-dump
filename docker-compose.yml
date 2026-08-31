@@ -67,6 +67,11 @@ services:
       UPGRADE_WORKER_TOKEN: "${UPGRADE_WORKER_TOKEN:-}"
     volumes:
       - .:/app
+      # Read-only view of the music library so locally imported albums can
+      # serve their own cover art without depending on Jellyfin ingesting
+      # folder images. eliot asleep just means the read fails and the UI
+      # falls back to its placeholder.
+      - /mnt/eliot-media/music:/music:ro
     # Bound to the Pi's LAN IP so Lidarr on eliot can pull /api/lidarr-list
     # cross-host (plain http, no CA hassle). Caddy still fronts the browse UI
     # at music.home.arpa via homelab-net; this port only serves the
