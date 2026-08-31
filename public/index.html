@@ -421,16 +421,31 @@ const trackRow = (t, endText, rank) => {
   </div>`;
 };
 
-const eventRow = (e) => `
-  <div class="row">
-    <div class="end" style="text-align:left;min-width:6.5em">${(e.datetime ?? '').slice(0, 10)}</div>
-    ${e.artist_id ? `<a href="#artist/${e.artist_id}">` : ''}${pic('artists', e.artist_id, e.image_url, e.artist_name)}${e.artist_id ? '</a>' : ''}
-    <div class="mid">
-      <div>${e.artist_id ? `<a href="#artist/${e.artist_id}"><b>${esc(e.artist_name ?? '')}</b></a>` : esc(e.artist_name ?? '')}</div>
-      <div class="sub">${esc(e.venue ?? '')}${e.city ? ' · ' + esc(e.city) : ''}${e.country ? ' (' + esc(e.country) + ')' : ''}</div>
+const gigCard = (e, i = 0) => {
+  const when = e.datetime ? new Date(e.datetime) : null;
+  const days = when ? Math.ceil((when - Date.now()) / 864e5) : null;
+  const soon = days != null && days >= 0 && days <= 14;
+  const countdown = days == null ? '' : days <= 0 ? 'tonight' : days === 1 ? 'tomorrow' : `in ${days} days`;
+  const dateLine = when ? when.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }) : 'date TBA';
+  const showTitle = e.name && (e.name ?? '').toLowerCase() !== (e.artist_name ?? '').toLowerCase() ? e.name : '';
+  return `
+  <div class="gig-card" style="--i:${Math.min(i, 17)}">
+    ${e.artist_id ? `<a class="gig-art" href="#artist/${e.artist_id}">` : '<div class="gig-art">'}
+      ${pic('artists', e.artist_id, e.image_url, e.artist_name)}
+      <span class="gig-leaf"><b>${when ? when.getDate() : '·'}</b><i>${when ? when.toLocaleDateString(undefined, { month: 'short' }) : 'TBA'}</i></span>
+      ${countdown ? `<span class="gig-soon${soon ? ' hot' : ''}">${countdown}</span>` : ''}
+    ${e.artist_id ? '</a>' : '</div>'}
+    <div class="gig-body">
+      <b>${e.artist_id ? `<a href="#artist/${e.artist_id}">${esc(e.artist_name ?? '')}</a>` : esc(e.artist_name ?? '')}</b>
+      ${showTitle ? `<span class="gig-title">${esc(showTitle)}</span>` : ''}
+      <span class="gig-where">${esc(e.venue ?? '')}${e.venue && e.city ? ' · ' : ''}${esc(e.city ?? '')}${e.country ? ` (${esc(e.country)})` : ''}</span>
+      <div class="gig-foot">
+        <span>${dateLine}</span>
+        ${e.url ? `<a class="gig-tickets" href="${esc(e.url)}" target="_blank" rel="noopener">Tickets ↗</a>` : ''}
+      </div>
     </div>
-    ${e.url ? `<a class="spbtn" style="margin:0;flex:none" href="${esc(e.url)}" target="_blank" rel="noopener">Tickets ↗</a>` : ''}
   </div>`;
+};
 
 const albumCell = (a) => `
   <div class="cell">
@@ -577,8 +592,8 @@ const views = {
       return '<div class="empty">no shows known yet — needs a (free) Ticketmaster API key, see the README</div>';
     }
     return `<h2>Near you (${d.countries.join(', ')})</h2>
-      ${d.near.length ? `<div class="rows">${d.near.map(eventRow).join('')}</div>` : '<div class="empty">nothing announced nearby</div>'}
-      ${d.elsewhere.length ? `<h2>Elsewhere (${d.elsewhere.length})</h2><div class="rows">${d.elsewhere.map(eventRow).join('')}</div>` : ''}`;
+      ${d.near.length ? `<div class="gig-grid">${d.near.map((e, i) => gigCard(e, i)).join('')}</div>` : '<div class="empty">nothing announced nearby</div>'}
+      ${d.elsewhere.length ? `<h2>Elsewhere (${d.elsewhere.length})</h2><div class="gig-grid">${d.elsewhere.map((e, i) => gigCard(e, i)).join('')}</div>` : ''}`;
   },
 
   async artist(id) {
@@ -607,7 +622,7 @@ const views = {
           ${spbtn('artist', a.id)} ${bcbtn(a.name, 'b')}
         </div>
       </div>
-      ${d.events?.length ? `<h2>Upcoming shows</h2><div class="rows">${d.events.map((e) => eventRow({ ...e, artist_name: a.name, image_url: a.image_url })).join('')}</div>` : ''}
+      ${d.events?.length ? `<h2>Upcoming shows</h2><div class="gig-grid">${d.events.map((e, i) => gigCard({ ...e, artist_name: a.name, image_url: a.image_url }, i)).join('')}</div>` : ''}
       ${a.discog_synced_at ? '' : '<div class="note">full discography not crawled yet — showing what the library knows so far</div>'}
       ${discog || '<div class="empty">no albums known yet</div>'}
       ${d.liked.length ? `<h2>Liked tracks</h2><div class="rows">${d.liked.map((t) => trackRow(t, day(t.added_at))).join('')}</div>` : ''}`;

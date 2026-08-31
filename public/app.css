@@ -1254,6 +1254,123 @@ input[type="range"] {
 .move.flat, .move.new { color: var(--ink-3); }
 .move.new { text-transform: uppercase; }
 
+/* Concert cards: artist art with a date leaf, countdown chip, ticket action. */
+.gig-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
+  gap: 14px;
+  margin-bottom: 26px;
+}
+
+.gig-card {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
+  animation: row-in .4s ease backwards;
+  animation-delay: calc(var(--i) * 40ms);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 320px;
+}
+
+.gig-card:hover {
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow);
+  transform: translateY(-3px);
+}
+
+.gig-art {
+  position: relative;
+  display: block;
+}
+
+.gig-art .pic {
+  width: 100%;
+  aspect-ratio: 16 / 10;
+}
+
+.gig-art .pic img,
+.gig-art .pic .ph { border-radius: 0; }
+
+.gig-leaf {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  display: grid;
+  place-items: center;
+  min-width: 44px;
+  padding: 6px 8px 7px;
+  background: rgba(10, 8, 10, .88);
+  border: 1px solid var(--line-strong);
+  border-radius: 11px;
+  backdrop-filter: blur(6px);
+  text-align: center;
+}
+
+.gig-leaf b { font-size: 17px; line-height: 1.1; }
+.gig-leaf i { color: var(--ink-2); font-size: 8px; font-style: normal; letter-spacing: .12em; text-transform: uppercase; }
+
+.gig-soon {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  padding: 4px 9px;
+  color: var(--ink-2);
+  background: rgba(10, 8, 10, .88);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  backdrop-filter: blur(6px);
+  font-size: 8px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.gig-soon.hot { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); font-weight: 700; }
+
+.gig-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px 13px;
+}
+
+.gig-body > b { font-size: 13px; }
+.gig-title { color: var(--ink-2); font-size: 10px; }
+.gig-where { color: var(--ink-3); font-size: 9px; }
+
+.gig-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 9px;
+  color: var(--ink-3);
+  font-size: 9px;
+}
+
+.gig-tickets {
+  flex: none;
+  padding: 5px 11px;
+  color: var(--accent);
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.gig-tickets:hover { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); text-decoration: none; }
+
+@media (max-width: 760px) {
+  .gig-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
+  .gig-art .pic { aspect-ratio: 16 / 11; }
+  .gig-body { padding: 10px 11px 11px; }
+}
+
 @media (max-width: 760px) {
   .podium { gap: 8px; }
   .podium .step .pic { width: 60px; height: 60px; }
