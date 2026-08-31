@@ -19,7 +19,8 @@ interface JellyfinAudioItem {
   Album?: string;
   AlbumId?: string;
   Artists?: string[];
-  AlbumArtists?: string[];
+  // Unlike Artists, Jellyfin serializes AlbumArtists as {Id, Name} pairs.
+  AlbumArtists?: { Name?: string }[];
   RunTimeTicks?: number;
   IndexNumber?: number;
   ParentIndexNumber?: number;
@@ -50,7 +51,7 @@ export interface PlayerStatus {
 const INDEX_TTL_MS = 5 * 60 * 1000;
 
 export function normalizeMusicText(value: string | null | undefined): string {
-  return (value ?? '')
+  return String(value ?? '')
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/&/g, ' and ')
@@ -69,7 +70,10 @@ export function scoreJellyfinMatch(track: TasteTrack, item: JellyfinAudioItem): 
 
   let score = 4;
   const tasteArtists = names(track.artists);
-  const jellyfinArtists = [...(item.Artists ?? []), ...(item.AlbumArtists ?? [])].map(normalizeMusicText);
+  const jellyfinArtists = [
+    ...(item.Artists ?? []),
+    ...(item.AlbumArtists ?? []).map((artist) => artist?.Name ?? ''),
+  ].map((name) => normalizeMusicText(name));
   if (tasteArtists.some((artist) => jellyfinArtists.includes(artist))) score += 3;
   if (normalizeMusicText(track.album) && normalizeMusicText(track.album) === normalizeMusicText(item.Album)) score += 3;
 

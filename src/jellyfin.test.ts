@@ -37,6 +37,16 @@ test('strongly scores album, artist, duration, and track-number agreement', () =
   assert.equal(score, 14);
 });
 
+test('reads artist credit from AlbumArtists {Id, Name} pairs, as Jellyfin serializes them', () => {
+  const score = scoreJellyfinMatch(track, {
+    Id: '1',
+    Name: 'Signal in the Static',
+    Album: 'Night Drive',
+    AlbumArtists: [{ Id: 'abc', Name: 'Local Signals' }],
+  } as never);
+  assert.equal(score, 10);
+});
+
 test('does not over-score a same-title track by another artist and album', () => {
   const score = scoreJellyfinMatch(track, {
     Id: '2',
