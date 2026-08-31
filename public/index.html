@@ -677,10 +677,16 @@ const views = {
       const tries = batch && j.status === 'upgraded'
         ? `${j.batch_size ?? 0} tracks imported and queued for FLAC`
         : j.phase === 'source' ? `${j.source_attempts}/3 source tries` : `${j.upgrade_attempts}/${j.max_attempts} FLAC tries`;
-      const controls = j.status === 'exhausted'
-        ? `<button type="button" data-upgrade-retry="${j.id}">Retry now</button>`
-        : ['pending_source', 'queued', 'retry_wait'].includes(j.status)
-          ? `<button type="button" data-upgrade-cancel="${j.id}">Cancel</button>` : '';
+      // Anything stalled or finished badly can be pushed again; anything
+      // that finished at all can be forgotten so it can be re-grabbed clean.
+      const canRetry = ['retry_wait', 'exhausted', 'cancelled'].includes(j.status);
+      const canCancel = ['pending_source', 'queued', 'retry_wait'].includes(j.status);
+      const canRemove = ['upgraded', 'already_lossless', 'exhausted', 'cancelled'].includes(j.status);
+      const controls = [
+        canRetry ? `<button type="button" data-upgrade-retry="${j.id}">Retry now</button>` : '',
+        canCancel ? `<button type="button" data-upgrade-cancel="${j.id}">Cancel</button>` : '',
+        canRemove ? `<button type="button" class="danger" data-upgrade-remove="${j.id}">Remove</button>` : '',
+      ].join('');
       return `<div class="upgrade-row">
         <span class="upgrade-state ${esc(j.status)}">${esc(batch && j.status === 'upgraded' ? 'album imported' : statusLabel[j.status] ?? j.status)}</span>
         <div class="mid"><b>${esc(j.title)}</b><span>${esc(j.artist)}${j.album ? ` &middot; ${esc(j.album)}` : ''}</span>
@@ -918,14 +924,20 @@ const after = {
       }
     });
     el.addEventListener('click', async (event) => {
-      const button = event.target.closest('[data-upgrade-retry], [data-upgrade-cancel]');
+      const button = event.target.closest('[data-upgrade-retry], [data-upgrade-cancel], [data-upgrade-remove]');
       if (!button) return;
+      const action = button.hasAttribute('data-upgrade-retry') ? 'retry'
+        : button.hasAttribute('data-upgrade-cancel') ? 'cancel' : 'delete';
+      const id = Number(button.dataset.upgradeRetry ?? button.dataset.upgradeCancel ?? button.dataset.upgradeRemove);
+      // Removing forgets the queue entry (and every track an album import
+      // generated); the audio files themselves stay on disk.
+      if (action === 'delete' && !confirm('Remove this from the queue and the library listing? The downloaded files stay on disk.')) return;
       button.disabled = true;
-      const retry = button.hasAttribute('data-upgrade-retry');
-      const id = Number(button.dataset.upgradeRetry ?? button.dataset.upgradeCancel);
       try {
-        await post(`/api/upgrades/${retry ? 'retry' : 'cancel'}`, { id });
-        notice(retry ? 'Retry queued now' : 'Upgrade cancelled');
+        const result = await post(`/api/upgrades/${action}`, { id });
+        notice(action === 'retry' ? 'Retry queued now'
+          : action === 'cancel' ? 'Upgrade cancelled'
+          : `Removed ${result.removed} entr${result.removed === 1 ? 'y' : 'ies'}`);
         show();
       } catch (err) {
         notice(err.message, true);

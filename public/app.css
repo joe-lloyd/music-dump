@@ -1683,6 +1683,10 @@ input[type="range"] {
   font-size: 10px;
 }
 .upgrade-actions button:hover { color: var(--ink); border-color: var(--line-strong); }
+.upgrade-actions button.danger { color: var(--coral); border-color: rgba(255, 120, 94, .3); }
+.upgrade-actions button.danger:hover { color: #fff; background: rgba(255, 120, 94, .18); border-color: var(--coral); }
+.upgrade-actions button:disabled { opacity: .4; cursor: default; }
+.upgrade-state.cancelled { color: var(--ink-3); }
 .toast.bad { border-color: rgba(229, 138, 120, .5); }
 
 /* Sing-along scale: the lyrics surface takes over the whole content area
