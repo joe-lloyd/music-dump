@@ -87,7 +87,7 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
       return {
         available: false,
         reason: 'not-matched',
-        detail: 'No confident match was found in the local Jellyfin library',
+        detail: 'No local file for this track — its album may not be downloaded yet',
         track,
       };
     }
