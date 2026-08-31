@@ -1824,7 +1824,10 @@ input[type="range"] {
   .brand-mini .brand-mark { flex-basis: 28px; width: 28px; height: 28px; }
   .brand-mini .brand-mark::after { width: 10px; height: 10px; }
 
-  .nav-backdrop {
+  /* Only ever painted while the drawer is open. An unconditional
+     display:block here beat the element's [hidden] attribute and left a
+     blurred sheet permanently over the page, swallowing every tap. */
+  body.nav-open .nav-backdrop {
     position: fixed;
     z-index: 70;
     inset: 0;
