@@ -60,8 +60,8 @@ function query(sql: string, ...args: (string | number)[]): unknown[] {
   }
 }
 
-const LOCAL_TRACK_PREFIX = 'local:';
-const LOCAL_ALBUM_PREFIX = 'local-album:';
+const LOCAL_TRACK_PREFIX = 'localtrack-';
+const LOCAL_ALBUM_PREFIX = 'localalbum-';
 
 // Music that came in through the app itself (YouTube / Spotify-link intake)
 // has no Spotify identity, so it lives in the upgrade store rather than the
@@ -1001,6 +1001,29 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     // Locally archived cover art (survives content being pulled from Spotify).
+    // Locally imported albums have no Spotify artwork; Jellyfin holds the
+    // embedded/folder art, so proxy it under a stable app URL.
+    const localImage = url.pathname.match(/^\/img\/local\/([A-Za-z0-9-]+)\.jpg$/);
+    if (localImage) {
+      const track = upgrades.localTracks().find((row) => row.album_id === localImage[1]);
+      if (track) {
+        try {
+          const match = await jellyfin.matchPath(track.path);
+          if (match) {
+            const upstream = await jellyfin.image(match.itemId);
+            const body = Buffer.from(await upstream.arrayBuffer());
+            res.writeHead(200, {
+              'content-type': upstream.headers.get('content-type') ?? 'image/jpeg',
+              'cache-control': 'public, max-age=3600',
+            });
+            res.end(body);
+            return;
+          }
+        } catch { /* fall through to 404 - the UI shows its letter placeholder */ }
+      }
+      res.writeHead(404).end();
+      return;
+    }
     const image = url.pathname.match(/^\/img\/(albums|artists)\/([A-Za-z0-9]+)\.jpg$/);
     if (image) {
       try {

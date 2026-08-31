@@ -121,8 +121,8 @@ export function validWorkerToken(configured: string, supplied: string): boolean 
  * application state with a different backup/retention lifecycle.
  */
 export interface LocalTrack {
-  id: string;            // "local:<queue id>"
-  album_id: string;      // "local-album:<slug>"
+  id: string;            // "localtrack-<queue id>"
+  album_id: string;      // "localalbum-<slug>"
   name: string;
   album: string;
   artists: string;
@@ -135,13 +135,13 @@ export interface LocalTrack {
 
 // Stable per (artist, album) so an album keeps one id across imports.
 export function localAlbumId(artist: string, album: string): string {
-  const slug = `${artist}~${album}`
+  const slug = `${artist}-${album}`
     .normalize('NFKD')
     .replace(/[̀-ͯ]/g, '')
     .toLowerCase()
-    .replace(/[^a-z0-9~]+/g, '-')
+    .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '');
-  return `local-album:${slug}`;
+  return `localalbum-${slug}`;
 }
 
 export class UpgradeStore {
@@ -322,7 +322,7 @@ export class UpgradeStore {
       const artist = String(r.artist ?? '');
       const album = String(r.album ?? '') || String(r.title ?? '');
       return {
-        id: `local:${r.id}`,
+        id: `localtrack-${r.id}`,
         album_id: localAlbumId(artist, album),
         name: String(r.title ?? ''),
         album,

@@ -350,6 +350,13 @@ export class JellyfinBridge {
     return plain ? { synced: null, plain } : null;
   }
 
+  // Album art for locally imported music: Jellyfin extracts embedded art
+  // (or a cover.jpg beside the files), so it is the one place that already
+  // has an image for a track with no Spotify identity.
+  async image(itemId: string): Promise<Response> {
+    return this.request(`/Items/${encodeURIComponent(itemId)}/Images/Primary?maxWidth=600`);
+  }
+
   async stream(itemId: string, range?: string, signal?: AbortSignal): Promise<Response> {
     const headers: Record<string, string> = {};
     if (range) headers.Range = range;

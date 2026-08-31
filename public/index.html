@@ -244,9 +244,10 @@ const dlBadge = `<span class="dl" title="downloaded in the library">${DL}</span>
 const PLAY = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z"/></svg>';
 const playControl = (track) => track.id ? `<button class="track-play" type="button" data-track-id="${esc(track.id)}" data-track-name="${esc(track.name)}" data-track-artists="${esc(track.artists ?? track.artist_name ?? '')}" data-track-duration="${Number(track.duration_ms ?? 0)}" aria-label="Play ${esc(track.name)}">${PLAY}</button>` : '';
 const upgradeControl = (track) => track.id ? `<button class="track-upgrade" type="button" data-upgrade-track="${esc(track.id)}" aria-label="Queue ${esc(track.name)} for a FLAC upgrade" title="Queue FLAC upgrade"><span>FLAC</span>&uarr;</button>` : '';
+const localArt = (id) => String(id ?? '').startsWith('localalbum-');
 const pic = (kind, id, cdnUrl, name, overlay = '') => `
   <div class="pic">
-    <img src="${id ? `/img/${kind}/${esc(id)}.jpg` : ''}" alt="" loading="lazy"
+    <img src="${id ? (localArt(id) ? `/img/local/${esc(id)}.jpg` : `/img/${kind}/${esc(id)}.jpg`) : ''}" alt="" loading="lazy"
          data-cdn="${esc(cdnUrl ?? '')}" onerror="imgErr(this)">
     <div class="ph" style="display:none">${esc((name ?? '?')[0].toUpperCase())}</div>
     ${overlay}
@@ -1157,7 +1158,7 @@ let showGen = 0;
 async function show() {
   const gen = ++showGen;
   const hash = location.hash.slice(1);
-  const detail = hash.match(/^(artist|album)\/([A-Za-z0-9]+)$/);
+  const detail = hash.match(/^(artist|album)\/([A-Za-z0-9-]+)$/);
   const tab = detail ? null : (TABS[hash] ? hash : 'overview');
   nav.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.t === tab));
   const copy = detail ? [detail[1] === 'artist' ? 'Artist in your archive' : 'Release in your archive', detail[1] === 'artist' ? 'Artist' : 'Album'] : PAGE_COPY[tab];

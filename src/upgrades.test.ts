@@ -283,7 +283,7 @@ test('installed files become local library tracks and albums, whatever the upgra
     assert.equal(local[0].name, 'Barbecue');
     assert.equal(local[0].album, 'Maigre');
     assert.equal(local[0].track_number, 1);
-    assert.match(local[0].id, /^local:\d+$/);
+    assert.match(local[0].id, /^localtrack-\d+$/);
     assert.equal(local[0].album_id, local[1].album_id, 'same album shares one id');
     assert.equal(local[0].album_id, localAlbumId('Igorrr and Ruby My Dear', 'Maigre'));
     assert.ok(local[0].path.endsWith('01 - Barbecue.mp3'));
