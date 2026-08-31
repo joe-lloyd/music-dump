@@ -510,6 +510,20 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
     LEFT JOIN albums al ON al.id = t.album_id
     ORDER BY lt.added_at DESC`),
 
+  // Music imported through the app, for the Songs page's downloads section.
+  '/api/local-tracks': () => upgrades.localTracks().map((track) => ({
+    id: track.id,
+    name: track.name,
+    artists: track.artists,
+    album: track.album,
+    album_id: track.album_id,
+    duration_ms: track.duration_ms,
+    track_number: track.track_number,
+    codec: track.codec,
+    standalone: track.standalone ? 1 : 0,
+    added_at: track.added_at,
+  })),
+
   '/api/albums': () => [
     // Locally imported albums are real music in the library, so they belong
     // in the same grid as saved Spotify albums - flagged downloaded, because

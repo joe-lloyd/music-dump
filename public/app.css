@@ -337,8 +337,8 @@ input:focus-visible {
 .primary-action:hover,
 .spbtn:hover {
   color: var(--accent-ink);
-  background: #e5ff83;
-  border-color: #e5ff83;
+  background: #ff83e5;
+  border-color: #ff83e5;
   text-decoration: none;
 }
 
@@ -1106,6 +1106,81 @@ input[type="range"] {
 .queue-duration { color: var(--ink-3); font: 8px ui-monospace, monospace; }
 
 .queue-button:disabled { opacity: .35; cursor: default; }
+
+/* Songs page: two columns of dense song cards on desktop. */
+.song-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 2px 22px;
+  margin-bottom: 8px;
+}
+
+.song-card {
+  display: grid;
+  grid-template-columns: auto 44px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--line);
+  border-radius: 10px;
+  transition: background .14s ease;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 60px;
+}
+
+.song-card:hover { background: rgba(255, 255, 255, .03); }
+.song-card.gone { opacity: .48; }
+
+.song-card .pic {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  aspect-ratio: auto;
+  border-radius: 7px;
+}
+
+.song-main { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+
+.song-main b,
+.song-sub,
+.song-album {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.song-main b { font-size: 11.5px; font-weight: 630; }
+.song-sub { color: var(--ink-2); font-size: 9.5px; }
+.song-album { color: var(--ink-3); font-size: 9px; }
+.song-album a:hover { color: var(--accent); }
+
+.song-end {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  color: var(--ink-3);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.song-end small { font-size: 8px; opacity: .75; }
+
+.sub-head {
+  margin: 18px 0 8px;
+  color: var(--ink-2);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+@media (max-width: 760px) {
+  .song-grid { grid-template-columns: 1fr; gap: 0; }
+  .song-card { grid-template-columns: auto 40px minmax(0, 1fr) auto; gap: 9px; padding-inline: 3px; }
+  .song-card .pic { width: 40px; height: 40px; }
+}
 
 .viz-legend {
   display: flex;

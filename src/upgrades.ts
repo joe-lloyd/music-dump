@@ -129,6 +129,7 @@ export interface LocalTrack {
   duration_ms: number | null;
   track_number: number | null;
   codec: string | null;
+  standalone: boolean;
   path: string;          // worker-side path, e.g. /data/library/music/...
   added_at: string;
 }
@@ -313,7 +314,8 @@ export class UpgradeStore {
   // off current_path, never off status.
   localTracks(): LocalTrack[] {
     return this.db.prepare(`
-      SELECT id, artist, title, album, duration_ms, track_number, current_path, current_codec, created_at
+      SELECT id, artist, title, album, duration_ms, track_number, current_path, current_codec,
+             created_at, parent_id, source_mode
       FROM upgrade_queue
       WHERE current_path IS NOT NULL AND current_path <> ''
       ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE, track_number, id
@@ -330,6 +332,8 @@ export class UpgradeStore {
         duration_ms: r.duration_ms == null ? null : Number(r.duration_ms),
         track_number: r.track_number == null ? null : Number(r.track_number),
         codec: (r.current_codec as string) ?? null,
+        // A one-off download rather than a track of an imported album.
+        standalone: r.parent_id == null && r.source_mode === 'single',
         path: String(r.current_path ?? ''),
         added_at: String(r.created_at ?? ''),
       };

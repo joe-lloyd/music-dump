@@ -445,6 +445,27 @@ const songGroup = (al) => groupHead(al) + `<div class="rows">${al.tracks.map((t)
 
 // Track row: internal album link, explicit ↗ for Spotify. `gone` greys +
 // badges rows that were un-liked / removed from a playlist.
+// Songs page card: art, title, artist, the album it came from, and length.
+// Denser than a full row so two fit side by side on a desktop width.
+const songCard = (t, meta = '') => {
+  const gone = t.removed_at;
+  const albumHref = t.album_id ? `#album/${t.album_id}` : null;
+  return `
+  <div class="song-card${gone ? ' gone' : ''}">
+    ${playControl(t)}
+    ${albumHref ? `<a href="${albumHref}">` : ''}${pic('albums', t.album_id, t.image_url, t.album ?? t.name)}${albumHref ? '</a>' : ''}
+    <div class="song-main">
+      <b>${esc(t.name)}</b>
+      <span class="song-sub">${esc(t.artists ?? t.artist_name ?? '')}</span>
+      ${t.album ? `<span class="song-album">${albumHref ? `<a href="${albumHref}">${esc(t.album)}</a>` : esc(t.album)}</span>` : ''}
+    </div>
+    <div class="song-end">
+      <span class="song-dur">${dur(t.duration_ms)}</span>
+      ${meta ? `<small>${esc(meta)}</small>` : ''}
+    </div>
+  </div>`;
+};
+
 const trackRow = (t, endText, rank) => {
   const gone = t.removed_at;
   const albumHref = t.album_id ? `#album/${t.album_id}` : null;
@@ -581,13 +602,16 @@ const views = {
   },
 
   async liked() {
-    const all = await api('/api/tracks');
-    const goneN = all.filter((t) => t.removed_at).length;
-    return `<div class="tools"><input type="search" id="q" placeholder="search songs…">
-      <label class="chk"><input type="checkbox" id="gone"> show un-liked (${goneN})</label></div>
-      <h2>Liked (${all.length - goneN})</h2><div id="likedOut"></div>
-      <h2>Everything in the library</h2><div id="allOut"></div>
-      <div style="text-align:center;margin-top:1rem"><button class="spbtn" id="more">load more</button></div>`;
+    return `<div class="tools">
+        <input type="search" id="q" placeholder="search your songs…">
+        <label class="chk"><input type="checkbox" id="gone"> show un-liked</label>
+      </div>
+      <h2 id="likedHead">Liked songs</h2>
+      <div id="likedOut"><div class="empty">loading…</div></div>
+      <div id="localWrap" hidden>
+        <h2 id="localHead">Downloaded here</h2>
+        <div id="localOut"></div>
+      </div>`;
   },
 
   async albums() {
@@ -786,29 +810,36 @@ const after = {
     });
   },
   liked(el) {
-    api('/api/tracks').then((all) => {
-      const likedOut = $('#likedOut', el), q = $('#q', el), gone = $('#gone', el);
-      // Liked songs, grouped by album, most recently liked group first.
+    // Only what you actually like, plus anything imported through the app.
+    // The old "everything in the library" pager lived here and buried both.
+    Promise.all([api('/api/tracks'), api('/api/local-tracks').catch(() => [])]).then(([all, local]) => {
+      const likedOut = $('#likedOut', el), localOut = $('#localOut', el);
+      const q = $('#q', el), gone = $('#gone', el);
+      const matches = (t, needle) => !needle ||
+        `${t.name} ${t.artists ?? ''} ${t.album ?? ''}`.toLowerCase().includes(needle);
+
       const draw = () => {
-        const needle = q.value.toLowerCase();
-        const rows = all.filter((t) => (gone.checked || !t.removed_at) &&
-          (!needle || `${t.name} ${t.artists} ${t.album}`.toLowerCase().includes(needle)));
-        const byAlbum = new Map();
-        for (const t of rows) {
-          const key = t.album_id ?? `~${t.id}`;
-          if (!byAlbum.has(key)) byAlbum.set(key, { id: t.album_id, name: t.album, image_url: t.image_url, release_date: t.release_date, artists: t.artists, tracks: [] });
-          byAlbum.get(key).tracks.push(t);
+        const needle = q.value.trim().toLowerCase();
+        const rows = all.filter((t) => (gone.checked || !t.removed_at) && matches(t, needle));
+        $('#likedHead', el).textContent = `Liked songs (${rows.length.toLocaleString()})`;
+        likedOut.innerHTML = rows.length
+          ? `<div class="song-grid">${rows.map((t) => songCard(t, day(t.added_at))).join('')}</div>`
+          : '<div class="empty">no matches</div>';
+
+        const mine = local.filter((t) => matches(t, needle));
+        $('#localWrap', el).hidden = !mine.length;
+        if (mine.length) {
+          const singles = mine.filter((t) => t.standalone);
+          const fromAlbums = mine.filter((t) => !t.standalone);
+          $('#localHead', el).textContent = `Downloaded here (${mine.length.toLocaleString()})`;
+          localOut.innerHTML =
+            (singles.length ? `<div class="song-grid">${singles.map((t) => songCard(t, 'single')).join('')}</div>` : '') +
+            (fromAlbums.length ? `<h3 class="sub-head">From imported albums</h3><div class="song-grid">${
+              fromAlbums.map((t) => songCard(t, t.codec || '')).join('')}</div>` : '');
         }
-        likedOut.innerHTML = [...byAlbum.values()].map((al) =>
-          groupHead(al) + `<div class="rows">${al.tracks.map((t) => slimRow(t, `${day(t.added_at)} · ${dur(t.duration_ms)}`)).join('')}</div>`
-        ).join('') || '<div class="empty">no matches</div>';
       };
-      const paged = pager({
-        url: '/api/songs', pageSize: 200,
-        container: $('#allOut', el), moreBtn: $('#more', el),
-        render: songGroup, empty: 'nothing yet — track listings hydrate over the next sync runs',
-      });
-      q.addEventListener('input', debounce(() => { draw(); paged.search(q.value); }));
+
+      q.addEventListener('input', debounce(draw));
       gone.addEventListener('change', draw);
       draw();
     });
