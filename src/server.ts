@@ -744,6 +744,7 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
                 FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
                WHERE ta.track_id = t.id)
       FROM app.app_plays ap JOIN tracks t ON t.id = ap.track_id
+      LEFT JOIN albums al ON al.id = t.album_id
       ORDER BY played_at DESC LIMIT 400`) as Record<string, unknown>[];
 
     // Plays of imported music: resolve them from the upgrade store instead.
