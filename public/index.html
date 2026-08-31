@@ -741,18 +741,89 @@ const after = {
   top(el) {
     const mode = $('#mode', el), rseg = $('#rseg', el), pseg = $('#pseg', el), out = $('#topOut', el);
 
+    // Count-up numbers for the stat tiles; instant under reduced motion.
+    const animateCounts = (root) => {
+      const els = [...root.querySelectorAll('.countup')];
+      if (!els.length) return;
+      if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        els.forEach((n) => { n.textContent = Number(n.dataset.n).toLocaleString(); });
+        return;
+      }
+      const t0 = performance.now();
+      const tick = (now) => {
+        const k = Math.min((now - t0) / 900, 1);
+        const ease = 1 - (1 - k) ** 3;
+        els.forEach((n) => { n.textContent = Math.round(Number(n.dataset.n) * ease).toLocaleString(); });
+        if (k < 1) requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    };
+
+    // Gold centre, silver left, bronze right.
+    const podium = (steps) => steps.length ? `<div class="podium">${[1, 0, 2]
+      .filter((i) => steps[i])
+      .map((i) => {
+        const s = steps[i];
+        return `<a class="step p${i + 1}" style="--i:${i}" ${s.href ? `href="${s.href}"` : ''}>
+          <span class="medal m${i + 1}">${i + 1}</span>
+          ${s.pic}
+          <b>${esc(s.name)}</b>
+          <small>${s.sub}</small>
+        </a>`;
+      }).join('')}</div>` : '';
+
     const loadRank = async (range) => {
-      const [artists, tracks] = await Promise.all([
-        api(`/api/top-artists?range=${range}`), api(`/api/top-tracks?range=${range}`)]);
-      out.innerHTML = `<div class="cards">
-        <div class="card"><h2>Top artists</h2><div class="rows">${artists.map((a) => `
-          <div class="row"><span class="rank">${a.rank}</span>
-            <a href="#artist/${a.id}">${pic('artists', a.id, a.image_url, a.name)}</a>
-            <div class="mid"><div><a href="#artist/${a.id}">${esc(a.name)}</a></div>
-            <div class="sub">${genres(a.genres, 2).join(', ')}</div></div>
-            ${spotify('artist', a.id)}</div>`).join('') || '<div class="empty">not synced yet</div>'}</div></div>
-        <div class="card"><h2>Top tracks</h2><div class="rows">${tracks.map((t) => trackRow(t, '', t.rank)).join('') || '<div class="empty">not synced yet</div>'}</div></div>
-      </div>`;
+      out.innerHTML = '<div class="empty">ranking…</div>';
+      const [artists, tracks, eraArtists, eraTracks] = await Promise.all([
+        api(`/api/top-artists?range=${range}`), api(`/api/top-tracks?range=${range}`),
+        range === 'long_term' ? null : api('/api/top-artists?range=long_term'),
+        range === 'long_term' ? null : api('/api/top-tracks?range=long_term')]);
+      const movement = (row, era) => {
+        if (!era) return '';
+        const was = era.get(row.id);
+        if (was == null) return '<span class="move new">new</span>';
+        if (was > row.rank) return `<span class="move up">▲${was - row.rank}</span>`;
+        if (was < row.rank) return `<span class="move down">▼${row.rank - was}</span>`;
+        return '<span class="move flat">=</span>';
+      };
+      const artistEra = eraArtists && new Map(eraArtists.map((a) => [a.id, a.rank]));
+      const trackEra = eraTracks && new Map(eraTracks.map((t) => [t.id, t.rank]));
+
+      // Genre mix of the era, weighted by how high each artist ranks.
+      const genreWeight = new Map();
+      for (const a of artists) {
+        for (const g of genres(a.genres, 4)) genreWeight.set(g, (genreWeight.get(g) ?? 0) + Math.max(1, 40 - a.rank));
+      }
+      const topGenres = [...genreWeight.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
+      const gwMax = Math.max(...topGenres.map(([, w]) => w), 1);
+
+      out.innerHTML = `
+        ${podium(artists.slice(0, 3).map((a) => ({
+          href: `#artist/${a.id}`, name: a.name, sub: genres(a.genres, 2).join(', ') || 'your podium',
+          pic: pic('artists', a.id, a.image_url, a.name),
+        })))}
+        ${artistEra ? '<div class="note">▲▼ movement vs your all-time ranking</div>' : ''}
+        <div class="cards">
+          <div class="card"><h2>Top artists</h2><div class="rows">${artists.slice(3).map((a, i) => `
+            <div class="row top-row" style="--i:${i}"><span class="rank">${a.rank}</span>
+              <a href="#artist/${a.id}">${pic('artists', a.id, a.image_url, a.name)}</a>
+              <div class="mid"><div><a href="#artist/${a.id}">${esc(a.name)}</a> ${movement(a, artistEra)}</div>
+              <div class="sub">${genres(a.genres, 2).join(', ')}</div></div>
+              ${spotify('artist', a.id)}</div>`).join('') || '<div class="empty">not synced yet</div>'}</div></div>
+          <div class="card"><h2>Top tracks</h2><div class="rows">${tracks.map((t, i) => `
+            <div class="row top-row" style="--i:${i}"><span class="rank">${t.rank}</span>
+              ${playControl(t)}
+              <div class="mid"><div>${esc(t.name)} ${movement(t, trackEra)}</div>
+              <div class="sub">${esc(t.artists ?? '')}</div></div>
+              <div class="end">${dur(t.duration_ms)}</div>
+              ${spotify('track', t.id)}</div>`).join('') || '<div class="empty">not synced yet</div>'}</div></div>
+          <div class="card"><h2>The sound of this era</h2>
+            ${topGenres.length ? `<div class="bars">${topGenres.map(([g, w]) => `
+              <div class="lbl">${esc(g)}</div>
+              <div class="bar" style="width:${Math.round((w / gwMax) * 100)}%" data-tip="${esc(g)}"></div>
+              <div class="n"></div>`).join('')}</div>` : '<div class="empty">genres still hydrating</div>'}</div>
+        </div>`;
+      out.querySelectorAll('[data-tip]').forEach((n) => tipOn(n, n.dataset.tip));
     };
 
     // Wrapped-for-any-range: play counts from lifetime history + API capture.
@@ -764,33 +835,60 @@ const after = {
         out.innerHTML = '<div class="empty">no plays in this range — the API capture builds from now on, and the extended-history import fills the past</div>';
         return;
       }
-      const tiles = [['plays', Number(t.plays).toLocaleString()], ['hours', Math.round((t.ms ?? 0) / 3.6e6).toLocaleString()],
-                     ['different tracks', Number(t.tracks).toLocaleString()], ['different artists', Number(t.artists).toLocaleString()]]
-        .map(([k, v]) => `<div class="tile"><b>${v}</b><span>${k}</span></div>`).join('');
+      const months = d.perMonth?.length || 1;
+      const tiles = [['plays', t.plays], ['hours', Math.round((t.ms ?? 0) / 3.6e6)],
+                     ['different tracks', t.tracks], ['different artists', t.artists],
+                     ['plays a month', Math.round(t.plays / months)]]
+        .map(([k, v]) => `<div class="tile"><b class="countup" data-n="${Number(v) || 0}">0</b><span>${k}</span></div>`).join('');
+
+      const insights = [];
+      const tt = d.topTracks[0];
+      if (tt) insights.push(`<b>${esc(tt.track_name)}</b> ruled this era — ${tt.plays} plays, ${((tt.plays / t.plays) * 100).toFixed(1)}% of everything you heard`);
+      const peak = (d.perMonth ?? []).reduce((a, b) => (b.n > (a?.n ?? 0) ? b : a), null);
+      if (peak && months > 1) insights.push(`Loudest month: <b>${peak.month}</b>, ${peak.n} plays`);
+      const ta = d.topArtists[0];
+      if (ta) insights.push(`You gave <b>${esc(ta.artist_name)}</b> ${Math.round(ta.ms / 3.6e6)} hours — ${((ta.ms / t.ms) * 100).toFixed(1)}% of all listening`);
+      const insightCards = insights.map((text, i) => `<div class="insight" style="--i:${i}"><p>${text}</p></div>`).join('');
+
+      const aMax = Math.max(...d.topArtists.map((a) => a.plays), 1);
       const artistRow = (a, i) => `
-        <div class="row"><span class="rank">${i + 1}</span>
+        <div class="row top-row" style="--i:${i}"><span class="rank">${i + 4}</span>
           ${a.artist_id ? `<a href="#artist/${a.artist_id}">` : ''}${pic('artists', a.artist_id, a.image_url, a.artist_name)}${a.artist_id ? '</a>' : ''}
           <div class="mid"><div>${a.artist_id ? `<a href="#artist/${a.artist_id}">${esc(a.artist_name)}</a>` : esc(a.artist_name)}</div>
-          <div class="sub">${Math.round(a.ms / 3.6e6)}h</div></div>
+          <div class="sub">${Math.round(a.ms / 3.6e6)}h</div><i class="sharebar" style="--w:${Math.round((a.plays / aMax) * 100)}%"></i></div>
           <div class="end">${a.plays}×</div></div>`;
+      const kMax = Math.max(...d.topTracks.map((x) => x.plays), 1);
       const trackRow2 = (x, i) => `
-        <div class="row"><span class="rank">${i + 1}</span>
+        <div class="row top-row" style="--i:${i}"><span class="rank">${i + 1}</span>
           ${playControl({ id: x.id, name: x.track_name, artist_name: x.artist_name, duration_ms: x.ms })}
-          <div class="mid"><div>${esc(x.track_name)}</div><div class="sub">${esc(x.artist_name ?? '')}</div></div>
+          <div class="mid"><div>${esc(x.track_name)}</div><div class="sub">${esc(x.artist_name ?? '')}</div>
+          <i class="sharebar" style="--w:${Math.round((x.plays / kMax) * 100)}%"></i></div>
           <div class="end">${x.plays}×</div>${x.id ? spotify('track', x.id) : ''}</div>`;
+      const bMax = Math.max(...d.topAlbums.map((x) => x.plays), 1);
       const albumRow = (x, i) => `
-        <div class="row"><span class="rank">${i + 1}</span>
+        <div class="row top-row" style="--i:${i}"><span class="rank">${i + 1}</span>
           ${x.album_id ? `<a href="#album/${x.album_id}">` : ''}${pic('albums', x.album_id, x.image_url, x.album_name)}${x.album_id ? '</a>' : ''}
           <div class="mid"><div>${x.album_id ? `<a href="#album/${x.album_id}">${esc(x.album_name)}</a>` : esc(x.album_name)}</div>
-          <div class="sub">${esc(x.artist_name ?? '')}</div></div>
+          <div class="sub">${esc(x.artist_name ?? '')}</div><i class="sharebar" style="--w:${Math.round((x.plays / bMax) * 100)}%"></i></div>
           <div class="end">${x.plays}×</div></div>`;
-      out.innerHTML = `<div class="tiles">${tiles}</div>
-        <div class="card" style="margin-bottom:1rem"><h2>Plays per month</h2>${monthChart(d.perMonth, 'plays')}</div>
+
+      out.innerHTML = `
+        ${podium(d.topArtists.slice(0, 3).map((a) => ({
+          href: a.artist_id ? `#artist/${a.artist_id}` : null,
+          name: a.artist_name,
+          sub: `${a.plays} plays · ${Math.round(a.ms / 3.6e6)}h`,
+          pic: pic('artists', a.artist_id, a.image_url, a.artist_name),
+        })))}
+        <div class="tiles">${tiles}</div>
+        ${insightCards ? `<div class="insights">${insightCards}</div>` : ''}
+        <div class="card wide" style="margin-bottom:1rem"><h2>Plays per month</h2>${monthChart(d.perMonth, 'plays')}</div>
         <div class="cards">
-          <div class="card"><h2>Top artists</h2><div class="rows">${d.topArtists.map(artistRow).join('')}</div></div>
+          <div class="card"><h2>Top artists</h2><div class="rows">${d.topArtists.slice(3).map(artistRow).join('')}</div></div>
           <div class="card"><h2>Top tracks</h2><div class="rows">${d.topTracks.map(trackRow2).join('')}</div></div>
           <div class="card"><h2>Top albums</h2><div class="rows">${d.topAlbums.map(albumRow).join('')}</div></div>
         </div>`;
+      animateCounts(out);
+      out.querySelectorAll('[data-tip]').forEach((n) => tipOn(n, n.dataset.tip));
     };
 
     // Range chips: presets + one per year of data.

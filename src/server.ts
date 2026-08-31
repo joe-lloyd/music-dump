@@ -8,7 +8,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { Readable } from 'node:stream';
 import { JellyfinBridge, type TasteTrack } from './jellyfin.ts';
 import { LyricsService } from './lyrics.ts';
-import { PlaysStore } from './plays.ts';
+import { APP_PLAYS_FILE, PlaysStore } from './plays.ts';
+import { existsSync } from 'node:fs';
 
 const ROOT = path.join(import.meta.dirname, '..');
 const DB_FILE = process.env.SPOTIFY_DB ?? path.join(ROOT, 'data', 'spotify.db');
@@ -38,6 +39,13 @@ const TASTE_ARTISTS_SQL = `SELECT COUNT(DISTINCT a.id) n FROM artists a
 function query(sql: string, ...args: (string | number)[]): unknown[] {
   const db = new DatabaseSync(DB_FILE, { readOnly: true });
   try {
+    // Read-only connection, so the attachment is read-only too. Lets any
+    // query fold `app.app_plays` (plays made in this player) into its joins.
+    if (existsSync(APP_PLAYS_FILE)) {
+      try {
+        db.exec(`ATTACH DATABASE '${APP_PLAYS_FILE.replaceAll("'", "''")}' AS app`);
+      } catch { /* a query that doesn't touch app.app_plays still works */ }
+    }
     return db.prepare(sql).all(...args);
   } finally {
     db.close();
@@ -446,6 +454,19 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
   '/api/wrapped': (params) => {
     const from = params.get('from') ?? '0000';
     const to = (params.get('to') ?? '9999') + '~'; // '~' sorts after any ISO char
+    // Plays made in this app live in their own database; ATTACH it read-only
+    // (the connection is read-only, so the attachment is too) and fold them
+    // into the unified stream. They can never overlap the Spotify sources.
+    const hasAppPlays = existsSync(APP_PLAYS_FILE);
+    const appBranch = hasAppPlays ? `
+        UNION ALL
+        SELECT ap.played_at, ap.track_id, t.name,
+               (SELECT group_concat(a.name, ', ' ORDER BY ta.position)
+                  FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
+                 WHERE ta.track_id = ap.track_id),
+               (SELECT al.name FROM albums al WHERE al.id = t.album_id),
+               ap.ms_played
+        FROM app.app_plays ap LEFT JOIN tracks t ON t.id = ap.track_id` : '';
     const cte = `
       WITH unified AS (
         SELECT ts, track_id, track_name, artist_name, album_name, ms_played
@@ -458,7 +479,7 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
                (SELECT al.name FROM albums al WHERE al.id = t.album_id),
                COALESCE(t.duration_ms, 210000)
         FROM plays p LEFT JOIN tracks t ON t.id = p.track_id
-        WHERE p.played_at > COALESCE((SELECT MAX(ts) FROM history_plays), '')
+        WHERE p.played_at > COALESCE((SELECT MAX(ts) FROM history_plays), '')${appBranch}
       ),
       ranged AS (SELECT * FROM unified WHERE ts >= ?1 AND ts <= ?2)
     `;

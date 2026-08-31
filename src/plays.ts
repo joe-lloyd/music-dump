@@ -7,13 +7,17 @@ import { DatabaseSync } from 'node:sqlite';
 
 const MAX_MS = 60 * 60 * 1000; // one hour: longer than any sane single play
 
+// Resolved once so read-only consumers (the wrapped/Top queries ATTACH this
+// file) agree with the store about where the plays live.
+export const APP_PLAYS_FILE = process.env.APP_PLAYS_DB
+  ?? path.join(import.meta.dirname, '..', 'data', 'app-plays.db');
+
 export class PlaysStore {
   private db: DatabaseSync | null = null;
   private readonly dbFile: string;
 
   constructor(dbFile?: string) {
-    this.dbFile = dbFile ?? process.env.APP_PLAYS_DB
-      ?? path.join(import.meta.dirname, '..', 'data', 'app-plays.db');
+    this.dbFile = dbFile ?? APP_PLAYS_FILE;
   }
 
   private handle(): DatabaseSync {

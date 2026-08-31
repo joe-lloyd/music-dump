@@ -96,9 +96,15 @@
     toastTimer = setTimeout(() => toast.classList.remove('on'), 4200);
   };
 
+  let pendingResume = null;
+  let lastPositionSave = 0;
+
   const save = () => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ queue, queueIndex, volume: audio.volume }));
+      const resume = current && audio.currentTime > 5
+        ? { id: current.id, pos: Math.floor(audio.currentTime) }
+        : pendingResume;
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ queue, queueIndex, volume: audio.volume, resume }));
     } catch { /* private browsing can deny storage */ }
   };
 
@@ -109,6 +115,23 @@
       queueIndex = Number.isInteger(saved.queueIndex) && saved.queueIndex < queue.length ? saved.queueIndex : -1;
       audioA.volume = audioB.volume = Number.isFinite(saved.volume) ? Math.max(0, Math.min(1, saved.volume)) : .72;
       volume.value = String(audio.volume);
+      // Reopening the page keeps the track and the spot in it: paint the
+      // bar in a resume state and seek after the first (gesture-gated) play.
+      const item = queue[queueIndex];
+      if (saved.resume?.id && item && saved.resume.id === item.id && Number.isFinite(saved.resume.pos)) {
+        pendingResume = saved.resume;
+        overline.textContent = 'Pick up where you left off';
+        title.textContent = item.name;
+        byline.textContent = `${item.artists ? `${item.artists} · ` : ''}paused at ${formatTime(pendingResume.pos)}`;
+        artFallback.textContent = (item.name || 'MT').slice(0, 1).toUpperCase();
+        elapsed.textContent = formatTime(pendingResume.pos);
+        if (item.durationMs) {
+          scrubber.value = String(Math.round((pendingResume.pos / (item.durationMs / 1000)) * 1000));
+          remaining.textContent = `−${formatTime(Math.max(0, item.durationMs / 1000 - pendingResume.pos))}`;
+        }
+        bar.dataset.state = 'paused';
+        playButton.disabled = false;
+      }
     } catch {
       queue = [];
       queueIndex = -1;
@@ -370,6 +393,8 @@
       scrubber.disabled = false;
       startPlayLog(current.id);
       await audio.play();
+      if (pendingResume?.id === current.id && pendingResume.pos > 0) audio.currentTime = pendingResume.pos;
+      pendingResume = null;
       save();
       renderQueue();
     } catch (err) {
@@ -450,6 +475,10 @@
       try { navigator.mediaSession.setPositionState({ duration, playbackRate: audio.playbackRate, position: Math.min(audio.currentTime, duration) }); } catch { /* unsupported state */ }
     }
     if (duration && duration - audio.currentTime < 20 && !audio.paused) prefetchNext();
+    if (!audio.paused && Date.now() - lastPositionSave > 5000) {
+      lastPositionSave = Date.now();
+      save();
+    }
   };
 
   const refreshStatus = async (force = false) => {
@@ -597,7 +626,7 @@
     }
   }
 
-  addEventListener('pagehide', () => flushPlay(false));
+  addEventListener('pagehide', () => { save(); flushPlay(false); });
 
   restore();
   renderQueue();
