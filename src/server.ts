@@ -726,14 +726,83 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
              WHERE ta.artist_id = a.id AND lt.removed_at IS NULL) >= ?)
     ORDER BY a.name`, Number(process.env.LIDARR_MIN_LIKED ?? 3)),
 
-  '/api/plays': () => query(`
-    SELECT p.played_at, p.context_type, t.id, t.name, al.image_url, al.id AS album_id,
-           (SELECT group_concat(a.name, ', ' ORDER BY ta.position)
-              FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
-             WHERE ta.track_id = t.id) AS artists
-    FROM plays p JOIN tracks t ON t.id = p.track_id
-    LEFT JOIN albums al ON al.id = t.album_id
-    ORDER BY p.played_at DESC LIMIT 300`),
+  // Everything you have listened to, wherever it happened: Spotify's
+  // recently-played, plus plays made in this player - including plays of
+  // locally imported music, which has no row in the taste DB to join to.
+  '/api/plays': () => {
+    const rows = query(`
+      SELECT p.played_at, p.context_type, 'spotify' AS source, t.id, t.name,
+             al.image_url, al.id AS album_id,
+             (SELECT group_concat(a.name, ', ' ORDER BY ta.position)
+                FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
+               WHERE ta.track_id = t.id) AS artists
+      FROM plays p JOIN tracks t ON t.id = p.track_id
+      LEFT JOIN albums al ON al.id = t.album_id
+      UNION ALL
+      SELECT ap.played_at, NULL, 'app', t.id, t.name, al.image_url, al.id,
+             (SELECT group_concat(a.name, ', ' ORDER BY ta.position)
+                FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
+               WHERE ta.track_id = t.id)
+      FROM app.app_plays ap JOIN tracks t ON t.id = ap.track_id
+      ORDER BY played_at DESC LIMIT 400`) as Record<string, unknown>[];
+
+    // Plays of imported music: resolve them from the upgrade store instead.
+    const localById = new Map(upgrades.localTracks().map((track) => [track.id, track]));
+    const localPlays = localById.size
+      ? appPlays.all<{ played_at: string; track_id: string }>(
+          `SELECT played_at, track_id FROM app_plays
+           WHERE track_id LIKE 'localtrack-%' ORDER BY played_at DESC LIMIT 400`)
+        .flatMap((play) => {
+          const track = localById.get(play.track_id);
+          if (!track) return [];
+          return [{
+            played_at: play.played_at,
+            context_type: null,
+            source: 'app',
+            id: track.id,
+            name: track.name,
+            image_url: null,
+            album_id: track.album_id,
+            artists: track.artists,
+            local: 1,
+          }];
+        })
+      : [];
+
+    return [...rows, ...localPlays]
+      .sort((a, b) => String(b.played_at).localeCompare(String(a.played_at)))
+      .slice(0, 300);
+  },
+
+  // One list of what most recently entered the library, from every source.
+  '/api/latest': () => {
+    const albums = query(`
+      SELECT al.id, al.name, al.saved_at AS added_at, al.image_url, 'album' AS kind,
+             (SELECT group_concat(a.name, ', ' ORDER BY aa.position)
+                FROM album_artists aa JOIN artists a ON a.id = aa.artist_id
+               WHERE aa.album_id = al.id) AS artists,
+             (SELECT downloaded FROM album_download_status ds WHERE ds.album_id = al.id) AS downloaded
+      FROM albums al WHERE al.is_saved = 1 AND al.saved_at IS NOT NULL
+      ORDER BY al.saved_at DESC LIMIT 40`) as Record<string, unknown>[];
+    const songs = query(`
+      SELECT t.id, t.name, lt.added_at, al.image_url, 'song' AS kind, al.id AS album_id,
+             al.name AS album,
+             (SELECT group_concat(a.name, ', ' ORDER BY ta.position)
+                FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
+               WHERE ta.track_id = t.id) AS artists
+      FROM liked_tracks lt JOIN tracks t ON t.id = lt.track_id
+      LEFT JOIN albums al ON al.id = t.album_id
+      WHERE lt.removed_at IS NULL AND lt.added_at IS NOT NULL
+      ORDER BY lt.added_at DESC LIMIT 40`) as Record<string, unknown>[];
+    const imported = localAlbums().map((album) => ({
+      id: album.id, name: album.name, added_at: album.added_at, image_url: null,
+      kind: 'imported', artists: album.artists, total_tracks: album.total_tracks, downloaded: 1,
+    }));
+    return [...albums, ...songs, ...imported]
+      .filter((row) => row.added_at)
+      .sort((a, b) => String(b.added_at).localeCompare(String(a.added_at)))
+      .slice(0, 60);
+  },
 };
 
 const server = http.createServer(async (req, res) => {

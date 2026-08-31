@@ -98,6 +98,10 @@ input:focus-visible {
 
 .skip-link:focus { transform: translateY(0); }
 
+.mobile-bar,
+.nav-backdrop,
+.burger { display: none; }
+
 .app-shell {
   display: grid;
   grid-template-columns: var(--sidebar) minmax(0, 1fr);
@@ -1141,6 +1145,9 @@ input[type="range"] {
 
 .song-main { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
 
+/* Keeps album rows aligned with song rows, which lead with a play button. */
+.song-spacer { display: block; width: 26px; }
+
 .song-main b,
 .song-sub,
 .song-album {
@@ -1762,37 +1769,90 @@ input[type="range"] {
   :root { --player: 126px; }
   body { padding-bottom: calc(var(--player) + 20px); }
   .app-shell { display: block; }
-  /* One compact top row: logo mark + scrolling tabs. The brand text, the
-     archive-state footer, and the page kicker all yield the space. */
-  .sidebar {
+
+  /* Ten destinations do not fit a phone width, so the sidebar becomes an
+     off-canvas drawer behind a burger instead of a scrolling tab strip. */
+  .mobile-bar {
     position: sticky;
-    inset: 0 0 auto;
+    z-index: 60;
+    top: 0;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    background: rgba(10, 8, 10, .92);
+    border-bottom: 1px solid var(--line);
+    backdrop-filter: blur(20px);
+  }
+
+  .burger {
+    display: grid;
+    place-content: center;
+    gap: 4px;
+    width: 38px;
+    height: 38px;
+    padding: 0;
+    background: transparent;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    cursor: pointer;
+  }
+
+  .burger span {
+    display: block;
+    width: 16px;
+    height: 2px;
+    background: var(--ink);
+    border-radius: 2px;
+    transition: transform .2s ease, opacity .2s ease;
+  }
+
+  body.nav-open .burger span:nth-child(1) { transform: translateY(6px) rotate(45deg); }
+  body.nav-open .burger span:nth-child(2) { opacity: 0; }
+  body.nav-open .burger span:nth-child(3) { transform: translateY(-6px) rotate(-45deg); }
+
+  .brand-mini {
     display: flex;
     align-items: center;
     gap: 10px;
-    width: 100%;
+    color: var(--ink);
+    font-size: 13px;
+    font-weight: 700;
+  }
+
+  .brand-mini:hover { text-decoration: none; }
+  .brand-mini .brand-mark { flex-basis: 28px; width: 28px; height: 28px; }
+  .brand-mini .brand-mark::after { width: 10px; height: 10px; }
+
+  .nav-backdrop {
+    position: fixed;
+    z-index: 70;
+    inset: 0;
+    display: block;
+    background: rgba(0, 0, 0, .55);
+    backdrop-filter: blur(2px);
+  }
+
+  .sidebar {
+    position: fixed;
+    z-index: 80;
+    inset: 0 auto var(--player) 0;
+    display: flex;
+    width: min(272px, 82vw);
     height: auto;
-    padding: 8px 12px 0;
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
+    padding: 22px 16px 18px;
+    border-right: 1px solid var(--line-strong);
+    box-shadow: var(--shadow);
+    transform: translateX(-101%);
+    transition: transform .24s cubic-bezier(.3, .8, .3, 1);
   }
-  .brand-head { margin: 0 0 8px; }
-  .brand > span:last-child { display: none; }
-  .brand-mark { flex-basis: 28px; width: 28px; height: 28px; }
-  .brand-mark::after { width: 10px; height: 10px; }
-  #nav {
-    flex: 1;
-    flex-direction: row;
-    gap: 2px;
-    overflow-x: auto;
-    padding-bottom: 8px;
-    scrollbar-width: none;
-  }
-  #nav::-webkit-scrollbar { display: none; }
-  #nav button { flex: 0 0 auto; width: auto; padding: 8px 10px; }
-  #nav button svg { width: 15px; height: 15px; }
-  .sidebar-foot { display: none; }
-  .content-shell { padding: 16px 16px 54px; }
+
+  body.nav-open .sidebar { transform: translateX(0); }
+  .brand-head { margin: 0 0 22px; }
+  #nav { flex-direction: column; gap: 3px; overflow-y: auto; }
+  #nav button { width: 100%; padding: 11px 12px; }
+  .sidebar-foot { display: grid; }
+  .content-shell { padding: 18px 16px 54px; }
   .page-kicker { display: none; }
   .page-head { align-items: center; min-height: 0; margin-bottom: 12px; padding-bottom: 10px; }
   .page-head h1 { font-size: 20px; }
