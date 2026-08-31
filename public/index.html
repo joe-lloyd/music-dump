@@ -613,11 +613,15 @@ const views = {
 
   async liked() {
     return `<div class="tools">
-        <input type="search" id="q" placeholder="search your songs…">
+        <input type="search" id="q" placeholder="search liked songs, or the whole library…">
         <label class="chk"><input type="checkbox" id="gone"> show un-liked</label>
       </div>
       <h2 id="likedHead">Liked songs</h2>
       <div id="likedOut"><div class="empty">loading…</div></div>
+      <div id="allWrap" hidden>
+        <h2 id="allHead">Everywhere in the library</h2>
+        <div id="allOut"></div>
+      </div>
       <div id="localWrap" hidden>
         <h2 id="localHead">Downloaded here</h2>
         <div id="localOut"></div>
@@ -880,7 +884,32 @@ const after = {
         }
       };
 
-      q.addEventListener('input', debounce(draw));
+      // Liked songs are the page; the search box reaches the whole library.
+      // Server-side because "everything" is tens of thousands of tracks.
+      let searchGen = 0;
+      const searchAll = async (needle) => {
+        const gen = ++searchGen;
+        const wrap = $('#allWrap', el), out = $('#allOut', el);
+        if (needle.length < 2) { wrap.hidden = true; out.innerHTML = ''; return; }
+        wrap.hidden = false;
+        $('#allHead', el).textContent = 'Everywhere in the library';
+        out.innerHTML = '<div class="empty">searching…</div>';
+        try {
+          const found = await (await fetch(`/api/search-songs?q=${encodeURIComponent(needle)}`)).json();
+          if (gen !== searchGen) return; // a newer keystroke won
+          const likedIds = new Set(all.map((t) => t.id));
+          const extra = found.filter((t) => !likedIds.has(t.id));
+          $('#allHead', el).textContent = `Everywhere in the library (${extra.length}${found.length >= 150 ? '+' : ''})`;
+          out.innerHTML = extra.length
+            ? `<div class="song-grid">${extra.map((t) => songCard(t, t.liked ? 'liked' : '')).join('')}</div>`
+            : '<div class="empty">nothing else matches — every hit is already in your liked songs</div>';
+        } catch {
+          if (gen === searchGen) out.innerHTML = '<div class="empty">search failed</div>';
+        }
+      };
+
+      const onType = debounce(() => { draw(); searchAll(q.value.trim()); });
+      q.addEventListener('input', onType);
       gone.addEventListener('change', draw);
       draw();
     });

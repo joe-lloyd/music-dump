@@ -694,6 +694,29 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
 
   // Whole track library grouped by album: a page of albums, each with its
   // tracks nested. Search matches album, artist, or track names.
+  // Flat track search across the WHOLE library, not just liked songs. The
+  // Songs page shows liked tracks by default; typing reaches everything.
+  '/api/search-songs': (params) => {
+    const term = (params.get('q') ?? '').trim();
+    if (term.length < 2) return [];
+    const q = `%${term}%`;
+    return query(`
+      SELECT t.id, t.name, t.duration_ms, t.album_id, al.name AS album, al.image_url,
+             (SELECT group_concat(a.name, ', ' ORDER BY ta.position)
+                FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
+               WHERE ta.track_id = t.id) AS artists,
+             (lt.track_id IS NOT NULL AND lt.removed_at IS NULL) AS liked
+      FROM tracks t
+      LEFT JOIN albums al ON al.id = t.album_id
+      LEFT JOIN liked_tracks lt ON lt.track_id = t.id
+      WHERE t.name LIKE ?1
+         OR al.name LIKE ?1
+         OR EXISTS (SELECT 1 FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
+                     WHERE ta.track_id = t.id AND a.name LIKE ?1)
+      ORDER BY liked DESC, t.popularity DESC NULLS LAST, t.name
+      LIMIT ?2`, q, Math.min(Number(params.get('limit') ?? 150), 400));
+  },
+
   '/api/songs': (params) => {
     const q = `%${params.get('q') ?? ''}%`;
     const limit = Math.min(Number(params.get('limit') ?? 40), 200);
