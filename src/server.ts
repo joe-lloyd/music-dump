@@ -878,7 +878,7 @@ const server = http.createServer(async (req, res) => {
           return;
         }
         const outcome = String(body.outcome ?? '');
-        if (!['source_ready', 'batch_ready', 'upgraded', 'already_lossless', 'failed'].includes(outcome)) {
+        if (!['source_ready', 'batch_ready', 'upgraded', 'already_lossless', 'failed', 'parked'].includes(outcome)) {
           throw new Error('invalid completion outcome');
         }
         if (outcome === 'batch_ready') {

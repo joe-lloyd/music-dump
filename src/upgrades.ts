@@ -67,7 +67,7 @@ export interface CreateUpgrade {
 export interface FinishUpgrade {
   id: number;
   claimToken: string;
-  outcome: 'source_ready' | 'upgraded' | 'already_lossless' | 'failed';
+  outcome: 'source_ready' | 'upgraded' | 'already_lossless' | 'failed' | 'parked';
   error?: string | null;
   candidate?: string | null;
   currentPath?: string | null;
@@ -468,6 +468,11 @@ export class UpgradeStore {
       } else if (input.outcome === 'already_lossless') {
         status = 'already_lossless';
         error = null;
+      } else if (input.outcome === 'parked') {
+        // The worker declined the job by policy (e.g. Soulseek disabled),
+        // which is not a failure: no attempt is burned, and a retry from the
+        // UI resumes it once the capability is switched back on.
+        status = 'cancelled';
       } else {
         if (!error) error = 'worker reported an unspecified failure';
         const attempts = job.phase === 'source' ? job.source_attempts : job.upgrade_attempts;
