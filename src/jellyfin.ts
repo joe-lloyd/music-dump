@@ -65,6 +65,37 @@ function names(value: string | null | undefined): string[] {
   return (value ?? '').split(/,| & | feat\.? | ft\.? /i).map(normalizeMusicText).filter(Boolean);
 }
 
+// Until Jellyfin's tag probe reaches a file (hours, on a big scan over NFS)
+// the item's Name is just the Lidarr filename — "Artist - Album - NN - Title"
+// — with no artist or album fields. Parse those out so a freshly scanned
+// library is matchable immediately. A mis-parse fails safe: the score
+// threshold still demands exact agreement with the Spotify record, so a
+// wrongly split name can only miss, never play the wrong song. Real tags
+// win as soon as they exist.
+export function deriveFromFilename(item: JellyfinAudioItem): JellyfinAudioItem {
+  if (item.Artists?.length || item.AlbumArtists?.length || item.Album) return item;
+  const parts = (item.Name ?? '').split(' - ');
+  if (parts.length < 4) return item;
+  let numberIndex = -1;
+  for (let i = parts.length - 2; i >= 2; i -= 1) {
+    if (/^\d{1,3}$/.test(parts[i].trim())) {
+      numberIndex = i;
+      break;
+    }
+  }
+  if (numberIndex < 0) return item;
+  const number = Number(parts[numberIndex]);
+  return {
+    ...item,
+    Name: parts.slice(numberIndex + 1).join(' - '),
+    Album: parts.slice(1, numberIndex).join(' - '),
+    Artists: [parts[0]],
+    // Lidarr writes multi-disc tracks as DNN (e.g. 204 = disc 2 track 4).
+    IndexNumber: item.IndexNumber ?? (number > 99 ? number % 100 : number),
+    ParentIndexNumber: item.ParentIndexNumber ?? (number > 99 ? Math.floor(number / 100) : undefined),
+  };
+}
+
 export function scoreJellyfinMatch(track: TasteTrack, item: JellyfinAudioItem): number {
   if (normalizeMusicText(track.name) !== normalizeMusicText(item.Name)) return -1;
 
@@ -162,8 +193,9 @@ export class JellyfinBridge {
       const response = await this.request(`/Items?${params}`);
       const data = await response.json() as JellyfinItemsResponse;
       const next = new Map<string, JellyfinAudioItem[]>();
-      for (const item of data.Items ?? []) {
-        if (!item.Id || !item.Name) continue;
+      for (const raw of data.Items ?? []) {
+        if (!raw.Id || !raw.Name) continue;
+        const item = deriveFromFilename(raw);
         const key = normalizeMusicText(item.Name);
         const bucket = next.get(key) ?? [];
         bucket.push(item);

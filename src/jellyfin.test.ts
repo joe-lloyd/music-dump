@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import test from 'node:test';
-import { JellyfinBridge, normalizeMusicText, scoreJellyfinMatch, type TasteTrack } from './jellyfin.ts';
+import { JellyfinBridge, deriveFromFilename, normalizeMusicText, scoreJellyfinMatch, type TasteTrack } from './jellyfin.ts';
 
 const track: TasteTrack = {
   id: 'spotify-track',
@@ -35,6 +35,31 @@ test('strongly scores album, artist, duration, and track-number agreement', () =
     IndexNumber: 3,
   } as never);
   assert.equal(score, 14);
+});
+
+test('derives artist, album, and track number from an unprobed Lidarr filename', () => {
+  const derived = deriveFromFilename({ Id: '1', Name: 'Local Signals - Night Drive - 03 - Signal in the Static' } as never);
+  assert.equal(derived.Name, 'Signal in the Static');
+  assert.equal(derived.Album, 'Night Drive');
+  assert.deepEqual(derived.Artists, ['Local Signals']);
+  assert.equal(derived.IndexNumber, 3);
+  assert.equal(scoreJellyfinMatch(track, derived), 11);
+});
+
+test('derivation keeps dashes in the title, reads DNN disc numbers, and skips odd shapes', () => {
+  const dashed = deriveFromFilename({ Id: '1', Name: 'Band - Album - 204 - Title - The Reprise' } as never);
+  assert.equal(dashed.Name, 'Title - The Reprise');
+  assert.equal(dashed.ParentIndexNumber, 2);
+  assert.equal(dashed.IndexNumber, 4);
+  const odd = deriveFromFilename({ Id: '1', Name: 'Just a Regular - Song Title' } as never);
+  assert.equal(odd.Name, 'Just a Regular - Song Title');
+  assert.equal(odd.Album, undefined);
+});
+
+test('derivation never overrides real tag metadata', () => {
+  const tagged = deriveFromFilename({ Id: '1', Name: 'A - B - 01 - C', Artists: ['Real Artist'] } as never);
+  assert.equal(tagged.Name, 'A - B - 01 - C');
+  assert.equal(tagged.Album, undefined);
 });
 
 test('reads artist credit from AlbumArtists {Id, Name} pairs, as Jellyfin serializes them', () => {
