@@ -71,7 +71,7 @@ async function resolveViaIsrc(db: TasteDb, artistId: string, artistName: string)
 // Fallback: name search. Only accept an exact (normalized) name match — a
 // wrong MBID makes Lidarr monitor a stranger's discography, so prefer a miss
 // ('' row, retried monthly) over a guess.
-async function resolveViaSearch(artistName: string): Promise<string | null> {
+export async function resolveViaSearch(artistName: string): Promise<string | null> {
   const body = await mbGet('artist', { query: `artist:"${escapeLucene(artistName)}"`, limit: '5' });
   await sleep(1100);
   const wanted = normalize(artistName);

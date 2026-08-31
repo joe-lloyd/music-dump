@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { Readable } from 'node:stream';
 import { JellyfinBridge, LOCAL_LIBRARY_PREFIX, type TasteTrack } from './jellyfin.ts';
 import { LyricsService } from './lyrics.ts';
+import { resolveViaSearch } from './musicbrainz.ts';
 import { APP_PLAYS_FILE, PlaysStore } from './plays.ts';
 import {
   UpgradeStore, localAlbumId, type BatchTrack, type LocalTrack, type SourceMode,
@@ -203,6 +204,37 @@ function latestDownloads(limit = 60): Record<string, unknown>[] {
 
   downloadCache = { at: Date.now(), rows };
   return rows.slice(0, limit);
+}
+
+
+// Music imported here (a YouTube link, say) never passes through Spotify, so
+// its artists are invisible to the nightly MusicBrainz stage and would never
+// reach Lidarr. Resolve them in the background and fold them into the same
+// custom list, so importing one track ends up with Lidarr tracking the whole
+// artist - and, per its own monitor setting, their albums.
+let resolvingArtists = false;
+
+function resolveImportedArtists(batch = 5): void {
+  if (resolvingArtists) return;
+  const pending = upgrades.unresolvedImportedArtists().slice(0, batch);
+  if (!pending.length) return;
+  resolvingArtists = true;
+  void (async () => {
+    try {
+      for (const name of pending) {
+        try {
+          // resolveViaSearch accepts only an exact normalized name match and
+          // already paces itself for MusicBrainz's 1 req/s rule. A miss is
+          // cached as '' so Lidarr never monitors a stranger's discography.
+          upgrades.rememberArtistMbid(name, await resolveViaSearch(name));
+        } catch {
+          break; // MusicBrainz unhappy - leave the rest for the next poll
+        }
+      }
+    } finally {
+      resolvingArtists = false;
+    }
+  })();
 }
 
 function tasteTrack(id: string): TasteTrack | null {
@@ -803,14 +835,27 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
   // the artist_mbid cache (src/musicbrainz.ts); eligibility mirrors that
   // stage's rule (followed, or ≥ LIDARR_MIN_LIKED liked tracks) so an artist
   // unfollowed later drops out of the feed even though the cache row stays.
-  '/api/lidarr-list': () => query(`
-    SELECT am.mbid AS MusicBrainzId, a.name AS ArtistName
-    FROM artist_mbid am JOIN artists a ON a.id = am.artist_id
-    WHERE am.mbid <> '' AND a.removed_at IS NULL
-      AND (a.is_followed = 1
-        OR (SELECT COUNT(*) FROM track_artists ta JOIN liked_tracks lt ON lt.track_id = ta.track_id
-             WHERE ta.artist_id = a.id AND lt.removed_at IS NULL) >= ?)
-    ORDER BY a.name`, Number(process.env.LIDARR_MIN_LIKED ?? 3)),
+  '/api/lidarr-list': () => {
+    const rows = query(`
+      SELECT am.mbid AS MusicBrainzId, a.name AS ArtistName
+      FROM artist_mbid am JOIN artists a ON a.id = am.artist_id
+      WHERE am.mbid <> '' AND a.removed_at IS NULL
+        AND (a.is_followed = 1
+          OR (SELECT COUNT(*) FROM track_artists ta JOIN liked_tracks lt ON lt.track_id = ta.track_id
+               WHERE ta.artist_id = a.id AND lt.removed_at IS NULL) >= ?)
+      ORDER BY a.name`, Number(process.env.LIDARR_MIN_LIKED ?? 3)) as { MusicBrainzId: string; ArtistName: string }[];
+
+    // Anything imported here joins the same list once its MBID is known.
+    const seen = new Set(rows.map((row) => row.MusicBrainzId));
+    for (const [name, mbid] of upgrades.importedArtistMbids()) {
+      if (mbid && !seen.has(mbid)) {
+        seen.add(mbid);
+        rows.push({ MusicBrainzId: mbid, ArtistName: name });
+      }
+    }
+    resolveImportedArtists(); // fire-and-forget; picked up by the next poll
+    return rows.sort((a, b) => a.ArtistName.localeCompare(b.ArtistName));
+  },
 
   // Everything you have listened to, wherever it happened: Spotify's
   // recently-played, plus plays made in this player - including plays of

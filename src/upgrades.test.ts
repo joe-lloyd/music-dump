@@ -323,3 +323,39 @@ test('removing a batch parent forgets its generated tracks and reports their fil
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('imported artists are tracked for Lidarr, with misses cached and retried', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'mbid-'));
+  const store = new UpgradeStore(path.join(dir, 'upgrades.db'));
+  try {
+    const job = store.create({
+      sourceUrl: 'https://youtu.be/abc', downloader: 'yt-dlp', sourceMode: 'single',
+      artist: 'Emissary', title: 'like clockwork', album: 'self-titled',
+    });
+    // Nothing installed yet, so nothing to tell Lidarr about.
+    assert.deepEqual(store.importedArtists(), []);
+
+    const claimed = store.claim('eliot')!;
+    store.finish({
+      id: job.id, claimToken: claimed.claim_token!, outcome: 'source_ready',
+      currentPath: '/data/library/music/_Singles/Emissary/like clockwork.opus',
+      currentCodec: 'opus',
+    });
+    assert.deepEqual(store.importedArtists(), ['Emissary']);
+    assert.deepEqual(store.unresolvedImportedArtists(), ['Emissary']);
+
+    store.rememberArtistMbid('Emissary', 'mbid-1234');
+    assert.deepEqual(store.unresolvedImportedArtists(), [], 'a resolved artist is not re-queried');
+    assert.equal(store.importedArtistMbids().get('Emissary'), 'mbid-1234');
+
+    // A miss is remembered so every poll does not re-ask MusicBrainz...
+    store.rememberArtistMbid('Emissary', null);
+    assert.deepEqual(store.unresolvedImportedArtists(), []);
+    assert.equal(store.importedArtistMbids().get('Emissary'), '');
+    // ...but is retried once the window passes.
+    assert.deepEqual(store.unresolvedImportedArtists(0), ['Emissary']);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

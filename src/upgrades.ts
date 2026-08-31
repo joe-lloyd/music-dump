@@ -203,6 +203,15 @@ export class UpgradeStore {
         claim_expires_at TEXT
       );
 
+      -- Artists that entered the library through an import. Lidarr's custom
+      -- list only speaks MusicBrainz ids, so each name is resolved once and
+      -- cached here; '' records a miss so it is not retried every poll.
+      CREATE TABLE IF NOT EXISTS imported_artists (
+        name TEXT PRIMARY KEY,
+        mbid TEXT,
+        checked_at TEXT
+      );
+
       CREATE TABLE IF NOT EXISTS upgrade_attempts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         queue_id INTEGER NOT NULL REFERENCES upgrade_queue(id) ON DELETE CASCADE,
@@ -341,6 +350,41 @@ export class UpgradeStore {
         path: String(r.current_path ?? ''),
         added_at: String(r.created_at ?? ''),
       };
+    });
+  }
+
+  // Distinct artists whose music actually landed on disk.
+  importedArtists(): string[] {
+    return (this.db.prepare(`
+      SELECT DISTINCT artist FROM upgrade_queue
+      WHERE current_path IS NOT NULL AND current_path <> '' AND TRIM(artist) <> ''
+    `).all() as { artist: string }[]).map((row) => row.artist);
+  }
+
+  // name -> mbid for imported artists resolved so far ('' means no match).
+  importedArtistMbids(): Map<string, string> {
+    return new Map((this.db.prepare(
+      'SELECT name, mbid FROM imported_artists WHERE mbid IS NOT NULL',
+    ).all() as { name: string; mbid: string }[]).map((row) => [row.name, row.mbid]));
+  }
+
+  rememberArtistMbid(name: string, mbid: string | null): void {
+    this.db.prepare(
+      'INSERT OR REPLACE INTO imported_artists (name, mbid, checked_at) VALUES (?, ?, ?)',
+    ).run(name, mbid ?? '', nowIso(this.now));
+  }
+
+  // Never looked up, or a miss older than the retry window.
+  unresolvedImportedArtists(retryDays = 30): string[] {
+    const known = new Map((this.db.prepare(
+      'SELECT name, mbid, checked_at FROM imported_artists',
+    ).all() as { name: string; mbid: string; checked_at: string }[]).map((r) => [r.name, r]));
+    const stale = Date.now() - retryDays * 86_400_000;
+    return this.importedArtists().filter((name) => {
+      const row = known.get(name);
+      if (!row) return true;
+      if (row.mbid) return false;
+      return new Date(row.checked_at || 0).getTime() <= stale;
     });
   }
 
