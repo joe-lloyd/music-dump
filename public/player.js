@@ -18,6 +18,15 @@
   const queueClose = document.querySelector('#queue-close');
   const queueList = document.querySelector('#queue-list');
   const queueCount = document.querySelector('#queue-count');
+  const lyricsButton = document.querySelector('#lyrics-button');
+  const lyricsPanel = document.querySelector('#lyrics-panel');
+  const lyricsClose = document.querySelector('#lyrics-close');
+  const lyricsBody = document.querySelector('#lyrics-body');
+  const lyricsTitle = document.querySelector('#lyrics-title');
+  const lyricsSource = document.querySelector('#lyrics-source');
+  const lyricsOffsetLabel = document.querySelector('#lyrics-offset');
+  const lyricsEarlier = document.querySelector('#lyrics-earlier');
+  const lyricsLater = document.querySelector('#lyrics-later');
   const toast = document.querySelector('#toast');
   const archiveState = document.querySelector('#archive-state');
   const archiveLabel = document.querySelector('#archive-label');
@@ -25,11 +34,17 @@
   const wakeButton = document.querySelector('#wake-button');
 
   const STORAGE_KEY = 'music-taste-player-v1';
+  const OFFSETS_KEY = 'music-taste-lyric-offsets-v1';
   let queue = [];
   let queueIndex = -1;
   let current = null;
   let pendingTrackId = null;
   let toastTimer;
+  let lyricsData = null;
+  let lyricsTrackId = null;
+  let lyricsFetch = 0;
+  let activeLyricLine = -1;
+  let lyricsScrolledAt = 0;
 
   const escapeHtml = (value) => String(value ?? '').replace(/[&<>"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[char]));
 
@@ -120,12 +135,117 @@
     });
   };
 
+  const lyricShift = () => {
+    if (!lyricsTrackId) return 0;
+    try {
+      const shift = JSON.parse(localStorage.getItem(OFFSETS_KEY) ?? '{}')[lyricsTrackId];
+      return Number.isFinite(shift) ? shift : 0;
+    } catch { return 0; }
+  };
+
+  const updateShiftLabel = () => {
+    const shift = lyricShift();
+    lyricsOffsetLabel.textContent = `${shift > 0 ? '+' : ''}${shift.toFixed(1)}s`;
+  };
+
+  const nudgeLyrics = (delta) => {
+    if (!lyricsTrackId) return;
+    try {
+      const offsets = JSON.parse(localStorage.getItem(OFFSETS_KEY) ?? '{}');
+      offsets[lyricsTrackId] = Math.round(((offsets[lyricsTrackId] ?? 0) + delta) * 10) / 10;
+      if (!offsets[lyricsTrackId]) delete offsets[lyricsTrackId];
+      localStorage.setItem(OFFSETS_KEY, JSON.stringify(offsets));
+    } catch { /* private browsing can deny storage */ }
+    updateShiftLabel();
+    syncLyrics(true);
+  };
+
+  // Highlight the last line whose (shifted) timestamp has passed; keep it
+  // centred unless the listener scrolled the panel themselves just now.
+  const syncLyrics = (force = false) => {
+    const lines = lyricsData?.synced;
+    if (!lines?.length || (lyricsPanel.hidden && !force)) return;
+    const now = audio.currentTime;
+    const shift = lyricShift();
+    let index = -1;
+    while (index + 1 < lines.length && lines[index + 1].time + shift <= now) index += 1;
+    if (index === activeLyricLine && !force) return;
+    lyricsBody.querySelector('.lyric-line.on')?.classList.remove('on');
+    activeLyricLine = index;
+    if (index < 0) return;
+    const el = lyricsBody.querySelector(`[data-line="${index}"]`);
+    if (!el) return;
+    el.classList.add('on');
+    if (Date.now() - lyricsScrolledAt > 4000) {
+      lyricsBody.scrollTop = el.offsetTop - lyricsBody.clientHeight / 2 + el.offsetHeight / 2;
+    }
+  };
+
+  const renderLyrics = () => {
+    const data = lyricsData;
+    activeLyricLine = -1;
+    if (!data) return;
+    if (data.instrumental) {
+      lyricsSource.textContent = 'Instrumental';
+      lyricsBody.innerHTML = '<div class="empty">An instrumental — nothing to sing along to</div>';
+    } else if (data.synced?.length) {
+      lyricsSource.textContent = data.source === 'jellyfin' ? 'Synced · local library' : 'Synced · LRCLIB';
+      lyricsBody.innerHTML = data.synced.map((line, index) =>
+        `<button class="lyric-line" type="button" data-line="${index}">${escapeHtml(line.text) || '♪'}</button>`).join('');
+      lyricsBody.scrollTop = 0;
+      syncLyrics(true);
+    } else if (data.plain) {
+      lyricsSource.textContent = data.source === 'jellyfin' ? 'Unsynchronized · local library' : 'Unsynchronized · LRCLIB';
+      lyricsBody.innerHTML = `<div class="lyrics-plain">${escapeHtml(data.plain)}</div>`;
+      lyricsBody.scrollTop = 0;
+    } else {
+      lyricsSource.textContent = 'Lyrics';
+      lyricsBody.innerHTML = '<div class="empty">No lyrics found for this track</div>';
+    }
+  };
+
+  const clearLyrics = (message) => {
+    lyricsFetch += 1;
+    lyricsData = null;
+    lyricsTrackId = null;
+    activeLyricLine = -1;
+    lyricsButton.disabled = true;
+    lyricsSource.textContent = 'Lyrics';
+    lyricsTitle.textContent = 'Nothing playing';
+    lyricsBody.innerHTML = `<div class="empty">${escapeHtml(message ?? 'Play a track to follow its lyrics')}</div>`;
+    updateShiftLabel();
+  };
+
+  const loadLyrics = async (track) => {
+    lyricsData = null;
+    lyricsTrackId = track.id;
+    activeLyricLine = -1;
+    lyricsButton.disabled = false;
+    lyricsTitle.textContent = track.name;
+    lyricsSource.textContent = 'Lyrics';
+    lyricsBody.innerHTML = '<div class="empty">Looking for lyrics…</div>';
+    updateShiftLabel();
+    const token = ++lyricsFetch;
+    try {
+      const response = await fetch(`/api/player/lyrics?id=${encodeURIComponent(track.id)}`);
+      if (!response.ok) throw new Error(`lyrics ${response.status}`);
+      const data = await response.json();
+      if (token !== lyricsFetch) return;
+      lyricsData = data;
+    } catch {
+      if (token !== lyricsFetch) return;
+      lyricsData = { available: false, synced: null, plain: null, instrumental: false, source: null };
+    }
+    renderLyrics();
+  };
+
   const showUnavailable = (result) => {
     bar.dataset.state = 'error';
     overline.textContent = result.reason === 'archive-offline' ? 'Archive asleep' : 'Unavailable locally';
     title.textContent = result.track?.name || queue[queueIndex]?.name || 'Cannot play this track';
     byline.textContent = result.detail || 'No local audio source is available';
     wakeButton.hidden = !(result.wakeAvailable && result.reason === 'archive-offline');
+    clearLyrics('Lyrics follow local playback');
     notify(result.detail || 'This track is not available in the local archive');
   };
 
@@ -172,6 +292,7 @@
       overline.textContent = 'Local archive · Jellyfin';
       setArtwork(current);
       updateMediaSession(current);
+      loadLyrics(current);
       audio.src = result.streamUrl;
       playButton.disabled = false;
       scrubber.disabled = false;
@@ -261,14 +382,45 @@
     if (Number.isFinite(audio.duration)) audio.currentTime = (Number(scrubber.value) / 1000) * audio.duration;
   });
   volume.addEventListener('input', () => { audio.volume = Number(volume.value); save(); });
+  // The queue and lyrics panels share the same corner — only one at a time.
   queueButton.addEventListener('click', () => {
     queuePanel.hidden = !queuePanel.hidden;
     queueButton.setAttribute('aria-expanded', String(!queuePanel.hidden));
+    if (!queuePanel.hidden) {
+      lyricsPanel.hidden = true;
+      lyricsButton.setAttribute('aria-expanded', 'false');
+    }
   });
   queueClose.addEventListener('click', () => {
     queuePanel.hidden = true;
     queueButton.setAttribute('aria-expanded', 'false');
   });
+  lyricsButton.addEventListener('click', () => {
+    lyricsPanel.hidden = !lyricsPanel.hidden;
+    lyricsButton.setAttribute('aria-expanded', String(!lyricsPanel.hidden));
+    if (!lyricsPanel.hidden) {
+      queuePanel.hidden = true;
+      queueButton.setAttribute('aria-expanded', 'false');
+      syncLyrics(true);
+    }
+  });
+  lyricsClose.addEventListener('click', () => {
+    lyricsPanel.hidden = true;
+    lyricsButton.setAttribute('aria-expanded', 'false');
+  });
+  lyricsEarlier.addEventListener('click', () => nudgeLyrics(-0.5));
+  lyricsLater.addEventListener('click', () => nudgeLyrics(0.5));
+  lyricsBody.addEventListener('click', (event) => {
+    const line = event.target.closest('.lyric-line');
+    const lines = lyricsData?.synced;
+    if (!line || !lines) return;
+    audio.currentTime = Math.max(0, lines[Number(line.dataset.line)].time + lyricShift());
+    lyricsScrolledAt = 0;
+    syncLyrics(true);
+  });
+  for (const gesture of ['wheel', 'touchmove', 'pointerdown']) {
+    lyricsBody.addEventListener(gesture, () => { lyricsScrolledAt = Date.now(); }, { passive: true });
+  }
   wakeButton.addEventListener('click', async () => {
     wakeButton.disabled = true;
     wakeButton.textContent = 'Waking eliot…';
@@ -296,7 +448,7 @@
 
   audio.addEventListener('play', () => { bar.dataset.state = 'playing'; if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing'; });
   audio.addEventListener('pause', () => { if (bar.dataset.state !== 'error') bar.dataset.state = 'paused'; if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused'; });
-  audio.addEventListener('timeupdate', updateProgress);
+  audio.addEventListener('timeupdate', () => { updateProgress(); syncLyrics(); });
   audio.addEventListener('durationchange', updateProgress);
   audio.addEventListener('ended', next);
   audio.addEventListener('error', () => {

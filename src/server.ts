@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { Readable } from 'node:stream';
 import { JellyfinBridge, type TasteTrack } from './jellyfin.ts';
+import { LyricsService } from './lyrics.ts';
 
 const ROOT = path.join(import.meta.dirname, '..');
 const DB_FILE = process.env.SPOTIFY_DB ?? path.join(ROOT, 'data', 'spotify.db');
@@ -17,6 +18,7 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
   '/player.js': { file: path.join(ROOT, 'public', 'player.js'), type: 'text/javascript; charset=utf-8' },
 };
 const jellyfin = new JellyfinBridge();
+const lyrics = new LyricsService();
 
 function query(sql: string, ...args: (string | number)[]): unknown[] {
   const db = new DatabaseSync(DB_FILE, { readOnly: true });
@@ -66,6 +68,12 @@ function ensureLidarrTables(): void {
 
 const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown>> = {
   '/api/player/status': (params) => jellyfin.status(params.get('refresh') === '1'),
+
+  '/api/player/lyrics': async (params) => {
+    const track = tasteTrack(params.get('id') ?? '');
+    if (!track) return { available: false, synced: null, plain: null, instrumental: false, source: null };
+    return lyrics.for(track, jellyfin);
+  },
 
   '/api/player/resolve': async (params) => {
     const track = tasteTrack(params.get('id') ?? '');

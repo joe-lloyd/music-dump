@@ -95,6 +95,15 @@ volume, and Media Session controls. Playback controls resolve against the local
 Jellyfin library; an item that is merely known to Spotify is never presented as
 successfully playable.
 
+Lyrics are local-first: a matched track asks Jellyfin for its lyrics (which
+covers `.lrc` sidecar files beside the audio and embedded lyric tags), and
+LRCLIB fills the gaps — identified client, 10 s timeout, hits cached forever
+and misses for a week in `data/lyrics.db`, so the third party is asked about
+each track at most once. Synced lyrics follow the current line, click any line
+to seek, and a per-track ±0.5 s nudge (persisted in the browser) corrects
+drifting timing. Plain lyrics render without fake timing; instrumentals and
+no-matches stay quiet.
+
 ## Local playback through Jellyfin
 
 The browser never receives the Jellyfin API key. `src/jellyfin.ts` indexes

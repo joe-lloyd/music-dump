@@ -247,6 +247,25 @@ export class JellyfinBridge {
     }
   }
 
+  // Jellyfin merges .lrc sidecars and embedded lyric tags behind one
+  // endpoint; Start is in 100ns ticks and absent on unsynchronized lines.
+  async lyrics(itemId: string): Promise<{ synced: { time: number; text: string }[] | null; plain: string | null } | null> {
+    let response: Response;
+    try {
+      response = await this.request(`/Audio/${encodeURIComponent(itemId)}/Lyrics`);
+    } catch {
+      return null;
+    }
+    const data = await response.json() as { Lyrics?: { Text?: string; Start?: number }[] };
+    const lines = data.Lyrics ?? [];
+    const timed = lines.filter((line) => typeof line.Start === 'number');
+    if (timed.length > 1) {
+      return { synced: timed.map((line) => ({ time: (line.Start as number) / 10_000_000, text: (line.Text ?? '').trim() })), plain: null };
+    }
+    const plain = lines.map((line) => line.Text ?? '').join('\n').trim();
+    return plain ? { synced: null, plain } : null;
+  }
+
   async stream(itemId: string, range?: string): Promise<Response> {
     const headers: Record<string, string> = {};
     if (range) headers.Range = range;

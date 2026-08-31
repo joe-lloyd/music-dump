@@ -176,6 +176,9 @@
     </div>
   </div>
   <div class="player-actions">
+    <button class="queue-button lyrics-button" id="lyrics-button" type="button" aria-expanded="false" aria-controls="lyrics-panel" aria-label="Lyrics" disabled>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V6l10-2v11"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="15" r="2.5"/></svg>
+    </button>
     <button class="queue-button" id="queue-button" type="button" aria-expanded="false" aria-controls="queue-panel">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h12M4 11h12M4 16h8M18 14v6m-3-3h6"/></svg>
       <span id="queue-count">0</span>
@@ -190,6 +193,19 @@
 <aside class="queue-panel" id="queue-panel" aria-label="Play queue" hidden>
   <div class="queue-head"><div><span>Next up</span><b>Your queue</b></div><button id="queue-close" type="button" aria-label="Close queue">×</button></div>
   <div id="queue-list" class="queue-list"></div>
+</aside>
+
+<aside class="queue-panel lyrics-panel" id="lyrics-panel" aria-label="Lyrics" hidden>
+  <div class="queue-head">
+    <div><span id="lyrics-source">Lyrics</span><b id="lyrics-title">Nothing playing</b></div>
+    <div class="lyrics-tools">
+      <button id="lyrics-earlier" type="button" aria-label="Shift lyrics half a second earlier">−.5s</button>
+      <span id="lyrics-offset" aria-live="polite">0.0</span>
+      <button id="lyrics-later" type="button" aria-label="Shift lyrics half a second later">+.5s</button>
+      <button id="lyrics-close" type="button" aria-label="Close lyrics">×</button>
+    </div>
+  </div>
+  <div id="lyrics-body" class="lyrics-body"><div class="empty">Play a track to follow its lyrics</div></div>
 </aside>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <div id="tip"></div>
