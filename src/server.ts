@@ -8,6 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { Readable } from 'node:stream';
 import { JellyfinBridge, type TasteTrack } from './jellyfin.ts';
 import { LyricsService } from './lyrics.ts';
+import { PlaysStore } from './plays.ts';
 
 const ROOT = path.join(import.meta.dirname, '..');
 const DB_FILE = process.env.SPOTIFY_DB ?? path.join(ROOT, 'data', 'spotify.db');
@@ -22,6 +23,17 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 };
 const jellyfin = new JellyfinBridge();
 const lyrics = new LyricsService();
+const appPlays = new PlaysStore();
+
+// Followed, or with at least one still-liked track — the artists that are
+// actually part of the taste. The raw `artists` table also holds every
+// feature credit and discography-crawl hydration (5000+ and growing
+// nightly), which made the old tile count meaningless.
+const TASTE_ARTISTS_SQL = `SELECT COUNT(DISTINCT a.id) n FROM artists a
+  WHERE a.is_followed = 1 OR EXISTS (
+    SELECT 1 FROM track_artists ta JOIN liked_tracks lt
+      ON lt.track_id = ta.track_id AND lt.removed_at IS NULL
+    WHERE ta.artist_id = a.id)`;
 
 function query(sql: string, ...args: (string | number)[]): unknown[] {
   const db = new DatabaseSync(DB_FILE, { readOnly: true });
@@ -102,12 +114,128 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
     };
   },
 
+  // Everything the overview needs, with Spotify plays (main DB) and this
+  // app's plays (own DB) merged in JS — cross-database joins aren't worth
+  // an ATTACH on a read-only handle.
+  '/api/overview': () => {
+    const one = (sql: string, ...a: (string | number)[]) => (query(sql, ...a)[0] as Record<string, unknown>) ?? {};
+    const toMap = (rows: unknown[], key = 'k') =>
+      Object.fromEntries((rows as { [k: string]: unknown; n: number }[]).map((r) => [String(r[key]), r.n]));
+
+    const spotifyDaily = toMap(query(`SELECT date(played_at, 'localtime') k, COUNT(*) n FROM plays
+      WHERE date(played_at, 'localtime') >= date('now', 'localtime', '-34 days') GROUP BY k`));
+    const appDaily = toMap(appPlays.all(`SELECT date(played_at, 'localtime') k, COUNT(*) n FROM app_plays
+      WHERE date(played_at, 'localtime') >= date('now', 'localtime', '-34 days') GROUP BY k`));
+    const daily = [];
+    for (let i = 34; i >= 0; i -= 1) {
+      const d = new Date(Date.now() - i * 86_400_000).toLocaleDateString('sv');
+      daily.push({ d, spotify: Number(spotifyDaily[d] ?? 0), app: Number(appDaily[d] ?? 0) });
+    }
+
+    const mergeBuckets = (a: Record<string, unknown>, b: Record<string, unknown>, keys: string[]) =>
+      keys.map((k) => ({ k, n: Number(a[k] ?? 0) + Number(b[k] ?? 0) }));
+    const hourKeys = Array.from({ length: 24 }, (_, h) => String(h).padStart(2, '0'));
+    const hours = mergeBuckets(
+      toMap(query(`SELECT strftime('%H', played_at, 'localtime') k, COUNT(*) n FROM plays GROUP BY k`)),
+      toMap(appPlays.all(`SELECT strftime('%H', played_at, 'localtime') k, COUNT(*) n FROM app_plays GROUP BY k`)),
+      hourKeys);
+    const weekdays = mergeBuckets(
+      toMap(query(`SELECT strftime('%w', played_at, 'localtime') k, COUNT(*) n FROM plays GROUP BY k`)),
+      toMap(appPlays.all(`SELECT strftime('%w', played_at, 'localtime') k, COUNT(*) n FROM app_plays GROUP BY k`)),
+      ['1', '2', '3', '4', '5', '6', '0']); // Monday-first
+
+    const artistCounts = new Map<string, { id: string; name: string; n: number }>();
+    for (const row of query(`SELECT a.id id, a.name name, COUNT(*) n FROM plays p
+        JOIN track_artists ta ON ta.track_id = p.track_id JOIN artists a ON a.id = ta.artist_id
+        WHERE p.played_at >= datetime('now', '-30 days') GROUP BY a.id`) as { id: string; name: string; n: number }[]) {
+      artistCounts.set(row.id, { ...row });
+    }
+    const appTracks = appPlays.all<{ track_id: string; n: number }>(
+      `SELECT track_id, COUNT(*) n FROM app_plays WHERE played_at >= datetime('now', '-30 days') GROUP BY track_id`);
+    if (appTracks.length) {
+      const marks = appTracks.map(() => '?').join(',');
+      const byTrack = new Map(appTracks.map((t) => [t.track_id, t.n]));
+      for (const row of query(`SELECT ta.track_id tid, a.id id, a.name name FROM track_artists ta
+          JOIN artists a ON a.id = ta.artist_id WHERE ta.track_id IN (${marks})`,
+          ...appTracks.map((t) => t.track_id)) as { tid: string; id: string; name: string }[]) {
+        const bump = byTrack.get(row.tid) ?? 0;
+        const entry = artistCounts.get(row.id) ?? { id: row.id, name: row.name, n: 0 };
+        entry.n += bump;
+        artistCounts.set(row.id, entry);
+      }
+    }
+    const topArtists = [...artistCounts.values()].sort((a, b) => b.n - a.n).slice(0, 10);
+
+    const window30 = (offsetDays: number) => Number(one(`SELECT COUNT(*) n FROM plays
+        WHERE played_at >= datetime('now', ?) AND played_at < datetime('now', ?)`,
+        `-${offsetDays + 30} days`, `-${offsetDays} days`).n ?? 0)
+      + Number(appPlays.all<{ n: number }>(`SELECT COUNT(*) n FROM app_plays
+        WHERE played_at >= datetime('now', ?) AND played_at < datetime('now', ?)`,
+        `-${offsetDays + 30} days`, `-${offsetDays} days`)[0]?.n ?? 0);
+
+    const listenedMs30 = Number(one(`SELECT COALESCE(SUM(t.duration_ms), 0) ms FROM plays p
+        JOIN tracks t ON t.id = p.track_id WHERE p.played_at >= datetime('now', '-30 days')`).ms ?? 0)
+      + Number(appPlays.all<{ ms: number }>(`SELECT COALESCE(SUM(ms_played), 0) ms FROM app_plays
+        WHERE played_at >= datetime('now', '-30 days')`)[0]?.ms ?? 0);
+
+    const history = one('SELECT COUNT(*) n, COALESCE(SUM(ms_played), 0) ms, MIN(ts) a, MAX(ts) b FROM history_plays');
+    let lifetimeMonthly = null;
+    if (Number(history.n) > 0) {
+      const historyMonths = query(`SELECT substr(ts, 1, 7) k, COUNT(*) n FROM history_plays GROUP BY k`) as { k: string; n: number }[];
+      const lastHistoryMonth = historyMonths.at(-1)?.k ?? '';
+      const laterSpotify = query(`SELECT substr(played_at, 1, 7) k, COUNT(*) n FROM plays
+        WHERE substr(played_at, 1, 7) > ? GROUP BY k`, lastHistoryMonth) as { k: string; n: number }[];
+      const appMonths = toMap(appPlays.all(`SELECT substr(played_at, 1, 7) k, COUNT(*) n FROM app_plays GROUP BY k`));
+      const merged = new Map<string, { m: string; spotify: number; app: number }>();
+      for (const r of [...historyMonths, ...laterSpotify]) merged.set(r.k, { m: r.k, spotify: r.n, app: 0 });
+      for (const [m, n] of Object.entries(appMonths)) {
+        const entry = merged.get(m) ?? { m, spotify: 0, app: 0 };
+        entry.app += Number(n);
+        merged.set(m, entry);
+      }
+      lifetimeMonthly = [...merged.values()].sort((a, b) => a.m.localeCompare(b.m));
+    }
+
+    return {
+      counts: {
+        tasteArtists: one(TASTE_ARTISTS_SQL).n,
+        liked: one('SELECT COUNT(*) n FROM liked_tracks WHERE removed_at IS NULL').n,
+        albums: one('SELECT COUNT(*) n FROM albums WHERE is_saved = 1').n,
+        playlists: one('SELECT COUNT(*) n FROM playlists WHERE removed_at IS NULL').n,
+        downloaded: one('SELECT downloaded_album_count n FROM lidarr_sync WHERE id = 1').n ?? 0,
+        totalPlays: Number(one('SELECT COUNT(*) n FROM plays').n ?? 0)
+          + Number(appPlays.all<{ n: number }>('SELECT COUNT(*) n FROM app_plays')[0]?.n ?? 0)
+          + Number(history.n ?? 0),
+        appPlays: Number(appPlays.all<{ n: number }>('SELECT COUNT(*) n FROM app_plays')[0]?.n ?? 0),
+      },
+      plays30: window30(0),
+      playsPrev30: window30(30),
+      hours30: Math.round(listenedMs30 / 360_000) / 10,
+      daily,
+      hours,
+      weekdays,
+      topArtists,
+      history: { rows: Number(history.n ?? 0), hours: Math.round(Number(history.ms ?? 0) / 3.6e6), from: history.a ?? null, to: history.b ?? null },
+      lifetimeMonthly,
+      likedPerMonth: query(`SELECT substr(added_at, 1, 7) AS month, COUNT(*) AS n FROM liked_tracks GROUP BY month ORDER BY month`),
+      genres: query(`
+        SELECT je.value AS genre, COUNT(DISTINCT lt.track_id) AS n
+        FROM liked_tracks lt
+        JOIN track_artists ta ON ta.track_id = lt.track_id
+        JOIN artists a ON a.id = ta.artist_id, json_each(a.genres) je
+        WHERE lt.removed_at IS NULL
+        GROUP BY je.value ORDER BY n DESC LIMIT 14`),
+      downloadsSyncedAt: one('SELECT synced_at t FROM lidarr_sync WHERE id = 1').t ?? null,
+      lastSync: one('SELECT MAX(finished_at) t FROM sync_runs').t,
+    };
+  },
+
   '/api/stats': () => {
     const one = (sql: string) => (query(sql)[0] as Record<string, unknown>) ?? {};
     return {
       counts: {
         liked: one('SELECT COUNT(*) n FROM liked_tracks WHERE removed_at IS NULL').n,
-        artists: one('SELECT COUNT(*) n FROM artists').n,
+        artists: one(TASTE_ARTISTS_SQL).n,
         followed: one('SELECT COUNT(*) n FROM artists WHERE is_followed = 1').n,
         albums: one('SELECT COUNT(*) n FROM albums WHERE is_saved = 1').n,
         playlists: one('SELECT COUNT(*) n FROM playlists WHERE removed_at IS NULL').n,
@@ -414,6 +542,37 @@ const server = http.createServer(async (req, res) => {
       await jellyfin.wake();
       res.writeHead(202, { 'content-type': 'application/json', 'cache-control': 'no-store' });
       res.end(JSON.stringify({ accepted: true }));
+      return;
+    }
+    if (url.pathname === '/api/player/played') {
+      if (req.method !== 'POST') {
+        res.writeHead(405, { allow: 'POST' }).end();
+        return;
+      }
+      const chunks: Buffer[] = [];
+      let size = 0;
+      for await (const chunk of req) {
+        size += (chunk as Buffer).length;
+        if (size > 10_000) {
+          res.writeHead(413).end();
+          return;
+        }
+        chunks.push(chunk as Buffer);
+      }
+      try {
+        const body = JSON.parse(Buffer.concat(chunks).toString()) as { id?: string; msPlayed?: number; completed?: boolean };
+        const track = tasteTrack(String(body.id ?? ''));
+        const ms = Number(body.msPlayed);
+        // Server-enforced Spotify-style threshold: under 20s is a skim, not a play.
+        if (!track || !Number.isFinite(ms) || ms < 20_000) {
+          res.writeHead(422, { 'content-type': 'application/json' }).end(JSON.stringify({ recorded: false }));
+          return;
+        }
+        appPlays.record(track.id, ms, Boolean(body.completed));
+        res.writeHead(204).end();
+      } catch {
+        res.writeHead(400).end();
+      }
       return;
     }
     if (url.pathname === '/api/player/stream') {

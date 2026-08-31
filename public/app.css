@@ -1107,6 +1107,45 @@ input[type="range"] {
 
 .queue-button:disabled { opacity: .35; cursor: default; }
 
+.viz-legend {
+  display: flex;
+  gap: 16px;
+  margin: 2px 0 12px;
+  color: var(--ink-2);
+  font-size: 9px;
+}
+
+.viz-legend i {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 6px;
+  border-radius: 3px;
+  vertical-align: -1px;
+}
+
+.card.wide { grid-column: 1 / -1; }
+
+.rotation { display: flex; flex-direction: column; }
+
+.rot-row {
+  display: grid;
+  grid-template-columns: 20px minmax(90px, auto) minmax(0, 1fr) 34px;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 4px;
+  border-bottom: 1px solid var(--line);
+}
+
+.rot-row:hover { background: rgba(255, 255, 255, .025); text-decoration: none; }
+.rot-row b { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.rot-row i { display: block; height: 8px; min-width: 2px; background: #d93bb4; border-radius: 4px; }
+.rot-row .n { color: var(--ink-3); font: 9px ui-monospace, monospace; text-align: right; }
+
+.card.nudge p { color: var(--ink-2); font-size: 12px; line-height: 1.75; }
+.card.nudge a { color: var(--accent); }
+.card.nudge code { font-size: 11px; color: var(--ink); }
+
 /* Slim top loader: on while any fetch is in flight. */
 .loader {
   position: fixed;

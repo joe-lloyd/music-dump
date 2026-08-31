@@ -48,6 +48,31 @@
   let current = null;
   let pendingTrackId = null;
   let toastTimer;
+  // Local play log: accumulated listened-milliseconds for the current
+  // track, flushed to the server when the track ends or is left. The
+  // server ignores anything under 20s, so skims never count.
+  let playLog = null;
+
+  const flushPlay = (completed) => {
+    const log = playLog;
+    playLog = null;
+    if (!log || log.ms < 20000) return;
+    const body = JSON.stringify({ id: log.trackId, msPlayed: Math.round(log.ms), completed });
+    if (!(navigator.sendBeacon && navigator.sendBeacon('/api/player/played', new Blob([body], { type: 'application/json' })))) {
+      fetch('/api/player/played', { method: 'POST', headers: { 'content-type': 'application/json' }, body, keepalive: true }).catch(() => {});
+    }
+  };
+
+  const startPlayLog = (trackId) => { playLog = { trackId, ms: 0, lastT: 0 }; };
+
+  const tickPlayLog = () => {
+    if (!playLog) return;
+    const t = audio.currentTime;
+    const dt = t - playLog.lastT;
+    if (dt > 0 && dt < 2) playLog.ms += dt * 1000; // seeks and swaps produce big jumps - don't count them
+    playLog.lastT = t;
+  };
+
   let lyricsData = null;
   let lyricsTrackId = null;
   let lyricsFetch = 0;
@@ -296,6 +321,7 @@
 
   const playAt = async (index) => {
     if (!queue.length || index < 0 || index >= queue.length) return;
+    flushPlay(false);
     prefetch = null;
     audio.pause();
     audio.removeAttribute('src');
@@ -342,6 +368,7 @@
       audio.src = result.streamUrl;
       playButton.disabled = false;
       scrubber.disabled = false;
+      startPlayLog(current.id);
       await audio.play();
       save();
       renderQueue();
@@ -370,6 +397,7 @@
   };
 
   const next = () => {
+    flushPlay(true);
     const index = queueIndex + 1;
     if (index >= queue.length) {
       audio.pause();
@@ -398,6 +426,7 @@
       scrubber.disabled = false;
       renderQueue();
       save();
+      startPlayLog(current.id);
       audio.play().catch(() => playAt(index));
       return;
     }
@@ -542,7 +571,7 @@
   for (const el of [audioA, audioB]) {
     el.addEventListener('play', (e) => { if (e.target !== audio) return; bar.dataset.state = 'playing'; ensureWordLoop(); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing'; });
     el.addEventListener('pause', (e) => { if (e.target !== audio) return; if (bar.dataset.state !== 'error') bar.dataset.state = 'paused'; if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused'; });
-    el.addEventListener('timeupdate', (e) => { if (e.target !== audio) return; updateProgress(); syncLyrics(); });
+    el.addEventListener('timeupdate', (e) => { if (e.target !== audio) return; tickPlayLog(); updateProgress(); syncLyrics(); });
     el.addEventListener('durationchange', (e) => { if (e.target === audio) updateProgress(); });
     el.addEventListener('ended', (e) => { if (e.target === audio) next(); });
     el.addEventListener('error', (e) => {
@@ -567,6 +596,8 @@
       try { navigator.mediaSession.setActionHandler(action, handler); } catch { /* action not supported */ }
     }
   }
+
+  addEventListener('pagehide', () => flushPlay(false));
 
   restore();
   renderQueue();

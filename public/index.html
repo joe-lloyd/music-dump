@@ -307,6 +307,58 @@ function monthChart(data, word = 'liked') {
 
 const debounce = (fn, ms = 300) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 
+// Series identity is fixed: this app is always magenta, Spotify always teal
+// (validated pair - CVD-separated, in the dark-mode lightness band).
+const VIZ = { app: '#d93bb4', spotify: '#279c7e', faint: 'rgba(244, 232, 242, .09)' };
+const vizLegend = (pairs) => `<div class="viz-legend">${pairs.map(([label, color]) => `<span><i style="background:${color}"></i>${label}</span>`).join('')}</div>`;
+
+// Stacked bars over time: Spotify at the base, this app on top, 2px gap
+// between segments, quiet days shown as faint ticks so the rhythm reads.
+function stackChart(points, labelOf) {
+  const W = 660, H = 170, base = H - 20;
+  const bw = Math.max(3, Math.floor(W / points.length) - 3);
+  const max = Math.max(...points.map((p) => p.spotify + p.app), 1);
+  const scale = (n) => Math.round((n / max) * (H - 52));
+  const bars = points.map((p, i) => {
+    const x = Math.round((i / points.length) * W);
+    const hs = p.spotify ? Math.max(scale(p.spotify), 2) : 0;
+    const ha = p.app ? Math.max(scale(p.app), 2) : 0;
+    const total = p.spotify + p.app;
+    const tip = `${labelOf(p)} · ${total} play${total === 1 ? '' : 's'}${p.app ? ` (${p.spotify} Spotify · ${p.app} here)` : ''}`;
+    return `<g data-tip="${esc(tip)}">
+      <rect x="${x}" y="${base - 2}" width="${bw}" height="${H}" fill="transparent"/>
+      ${total === 0 ? `<rect x="${x}" y="${base - 2}" width="${bw}" height="2" fill="${VIZ.faint}"/>` : ''}
+      ${hs ? `<rect x="${x}" y="${base - hs}" width="${bw}" height="${hs}" rx="2" fill="${VIZ.spotify}"/>` : ''}
+      ${ha ? `<rect x="${x}" y="${base - hs - (hs ? 2 : 0) - ha}" width="${bw}" height="${ha}" rx="2" fill="${VIZ.app}"/>` : ''}
+    </g>`;
+  }).join('');
+  const peak = points.reduce((a, b) => (b.spotify + b.app > a.spotify + a.app ? b : a));
+  const px = Math.round((points.indexOf(peak) / points.length) * W) + bw / 2;
+  const peakN = peak.spotify + peak.app;
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%">
+    ${peakN ? `<text x="${Math.min(Math.max(px, 12), W - 12)}" y="${base - Math.max(scale(peakN), 4) - 8}" text-anchor="middle">${peakN}</text>` : ''}
+    ${bars}
+    <text x="0" y="${H - 4}">${esc(labelOf(points[0]))}</text>
+    <text x="${W}" y="${H - 4}" text-anchor="end">${esc(labelOf(points.at(-1)))}</text></svg>`;
+}
+
+// Single-series rhythm bars (hours of the day, days of the week).
+function rhythmChart(buckets, labels, tipOf) {
+  const W = 660, H = 130, base = H - 20;
+  const bw = Math.max(4, Math.floor(W / buckets.length) - 4);
+  const max = Math.max(...buckets.map((b) => b.n), 1);
+  const bars = buckets.map((b, i) => {
+    const x = Math.round((i / buckets.length) * W);
+    const h = b.n ? Math.max(Math.round((b.n / max) * (H - 40)), 2) : 0;
+    return `<g data-tip="${esc(tipOf(b, i))}">
+      <rect x="${x}" y="0" width="${bw}" height="${base}" fill="transparent"/>
+      ${h ? `<rect x="${x}" y="${base - h}" width="${bw}" height="${h}" rx="2" fill="${VIZ.app}"/>` : `<rect x="${x}" y="${base - 2}" width="${bw}" height="2" fill="${VIZ.faint}"/>`}
+    </g>`;
+  }).join('');
+  const ticks = labels.map(([i, text]) => `<text x="${Math.round((i / buckets.length) * W)}" y="${H - 4}">${text}</text>`).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%">${bars}${ticks}</svg>`;
+}
+
 // Streams ALL pages of a paged endpoint into the DOM automatically (small
 // pauses between pages keep the browser responsive). Everything ends up
 // rendered, so browser find (cmd+F) sees the whole library. Search restarts
@@ -391,36 +443,75 @@ const albumCell = (a) => `
 
 const views = {
   async overview() {
-    const s = await api('/api/stats');
-    const c = s.counts;
-    const h = s.history;
-    const tiles = [['liked songs', c.liked], ['artists', c.artists], ['followed', c.followed],
-                   ['saved albums', c.albums], ['playlists', c.playlists], ['plays captured', c.plays],
-                   ...(h ? [['lifetime plays', Number(h.n).toLocaleString()], ['hours listened', Math.round(h.ms / 3.6e6).toLocaleString()]] : [])]
-      .map(([k, v]) => `<div class="tile"><b>${v}</b><span>${k}</span></div>`).join('');
-    // Albums actually in the download library (from the Lidarr sync). Leads the
-    // row, accent-coloured, with the ⤓ icon and a freshness stamp.
+    const [o, s] = await Promise.all([api('/api/overview'), api('/api/stats')]);
+    const c = o.counts;
+    const delta = o.playsPrev30 ? Math.round(((o.plays30 - o.playsPrev30) / o.playsPrev30) * 100) : null;
+    const trend = delta == null ? 'The record starts here — every play in this player now counts too.'
+      : delta >= 0 ? `Up ${delta}% on the month before.` : `Down ${-delta}% on the month before — quieter days.`;
+
+    const tiles = [
+      ['artists in your taste', c.tasteArtists], ['liked songs', c.liked],
+      ['saved albums', c.albums], ['playlists', c.playlists],
+      ['plays on record', Number(c.totalPlays).toLocaleString()],
+      ['played right here', Number(c.appPlays).toLocaleString()],
+      ...(o.history.rows ? [['lifetime hours', Number(o.history.hours).toLocaleString()]] : []),
+    ].map(([k, v]) => `<div class="tile"><b>${v}</b><span>${k}</span></div>`).join('');
     const dlTile = `<div class="tile download-tile"><b>${DL} ${(c.downloaded ?? 0).toLocaleString()}</b>` +
-      `<span>albums downloaded${s.downloadsSyncedAt ? ` · ${ago(s.downloadsSyncedAt)}` : ''}</span></div>`;
-    const gmax = Math.max(...s.genres.map((g) => g.n), 1);
-    const gbars = s.genres.map((g) => `
+      `<span>albums downloaded${o.downloadsSyncedAt ? ` · ${ago(o.downloadsSyncedAt)}` : ''}</span></div>`;
+
+    const dayLabel = (p) => new Date(`${p.d}T12:00:00`).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+    const monthLabel = (p) => p.m;
+    const hourNames = [[0, '00'], [6, '06'], [12, '12'], [18, '18']];
+    const weekdayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+    const rotMax = Math.max(...o.topArtists.map((a) => a.n), 1);
+    const rotation = o.topArtists.map((a, i) => `
+      <a class="rot-row" href="#artist/${a.id}">
+        <span class="rank">${i + 1}</span>
+        <b>${esc(a.name)}</b>
+        <i style="width:${Math.round((a.n / rotMax) * 100)}%"></i>
+        <span class="n">${a.n}</span>
+      </a>`).join('');
+
+    const gmax = Math.max(...o.genres.map((g) => g.n), 1);
+    const gbars = o.genres.map((g) => `
       <div class="lbl">${esc(g.genre)}</div>
       <div class="bar" style="width:${Math.round((g.n / gmax) * 100)}%" data-tip="${esc(g.genre)} · ${g.n} liked tracks"></div>
       <div class="n">${g.n}</div>`).join('');
+
+    const lifetimeCard = o.lifetimeMonthly
+      ? `<div class="card wide"><h2>Every month since the beginning</h2>
+          ${vizLegend([['Spotify', VIZ.spotify], ['This player', VIZ.app]])}
+          ${stackChart(o.lifetimeMonthly, monthLabel)}</div>`
+      : `<div class="card nudge"><h2>Unlock your lifetime</h2>
+          <p>Spotify will hand over every play you've ever made — years of history this page can't show yet.
+          Request the <b>Extended streaming history</b> at
+          <a href="https://www.spotify.com/account/privacy/" target="_blank" rel="noopener">spotify.com/account/privacy ↗</a>
+          (takes a few days to arrive), then import it with <code>src/import-history.ts</code>. This page lights up on the next visit.</p></div>`;
+
     return `<section class="overview-hero">
         <div>
-          <span class="eyebrow">Local listening archive</span>
-          <h2>The songs that stayed, <em>ready to play.</em></h2>
-          <p>Spotify remembers the signals. Your local archive keeps the records. Music Taste brings both sides together without pretending a file exists when it does not.</p>
+          <span class="eyebrow">Last 30 days · Spotify + this player</span>
+          <h2>${Number(o.plays30).toLocaleString()} plays, <em>${o.hours30} hours.</em></h2>
+          <p>${trend}</p>
         </div>
-        <aside class="hero-signal"><span>Downloaded now</span><b>${Number(c.downloaded ?? 0).toLocaleString()} albums</b><small>${s.downloadsSyncedAt ? `Library checked ${ago(s.downloadsSyncedAt)}` : 'Waiting for the first Lidarr library snapshot'}</small></aside>
+        <aside class="hero-signal"><span>Downloaded now</span><b>${Number(c.downloaded ?? 0).toLocaleString()} albums</b><small>${o.downloadsSyncedAt ? `Library checked ${ago(o.downloadsSyncedAt)}` : 'Waiting for the first Lidarr library snapshot'}</small></aside>
       </section>
       <div class="tiles">${dlTile}${tiles}</div>
       <div class="cards">
-        <div class="card"><h2>Liked songs added per month</h2>${monthChart(s.likedPerMonth)}</div>
+        <div class="card wide"><h2>Daily listening — the last five weeks</h2>
+          ${vizLegend([['Spotify', VIZ.spotify], ['This player', VIZ.app]])}
+          ${stackChart(o.daily, dayLabel)}</div>
+        <div class="card"><h2>The listening clock</h2>
+          ${rhythmChart(o.hours, hourNames, (b) => `${b.k}:00 – ${b.k}:59 · ${b.n} plays`)}</div>
+        <div class="card"><h2>Day rhythm</h2>
+          ${rhythmChart(o.weekdays, weekdayNames.map((w, i) => [i, w]), (b, i) => `${weekdayNames[i]} · ${b.n} plays`)}</div>
+        <div class="card"><h2>Heavy rotation — 30 days</h2>
+          ${o.topArtists.length ? `<div class="rotation">${rotation}</div>` : '<div class="empty">play something — this fills itself in</div>'}</div>
+        <div class="card"><h2>Liked songs over the years</h2>${monthChart(o.likedPerMonth)}</div>
         <div class="card"><h2>Top genres (by liked tracks)</h2>
-          ${s.genres.length ? `<div class="bars">${gbars}</div>` : '<div class="empty">genres still hydrating — check back after the next sync</div>'}</div>
-        ${h ? `<div class="card"><h2>Lifetime listening per month (${day(h.first)} → ${day(h.last)})</h2>${monthChart(h.perMonth, 'plays')}</div>` : ''}
+          ${o.genres.length ? `<div class="bars">${gbars}</div>` : '<div class="empty">genres still hydrating — check back after the next sync</div>'}</div>
+        ${lifetimeCard}
       </div>
       ${s.releases?.length ? `<h2>New & upcoming from artists you follow (last 90 days)</h2><div class="grid">${s.releases.map(albumCell).join('')}</div>` : ''}`;
   },
