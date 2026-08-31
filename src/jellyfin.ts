@@ -190,7 +190,10 @@ export class JellyfinBridge {
         limit: '100000',
       });
       if (this.userId) params.set('userId', this.userId);
-      const response = await this.request(`/Items?${params}`);
+      // The full audio dump takes well over the default 12 s while a
+      // library scan has the Pi busy; a cold container must still manage
+      // to build its first index.
+      const response = await this.request(`/Items?${params}`, { signal: AbortSignal.timeout(90_000) });
       const data = await response.json() as JellyfinItemsResponse;
       const next = new Map<string, JellyfinAudioItem[]>();
       for (const raw of data.Items ?? []) {
