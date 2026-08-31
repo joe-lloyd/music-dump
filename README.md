@@ -90,8 +90,13 @@ exporter. Locally: `node src/server.ts` → <http://localhost:8080>. On the
 homelab: **<https://music.home.arpa>** (Caddy → `spotify-taste-db-web:8080`
 over `homelab-net`).
 
-The UI is dark-first and includes a persistent bottom player, queue, seeking,
-volume, and Media Session controls. Playback controls resolve against the local
+The UI is dark-first (neon-magenta identity) and includes a persistent bottom
+player with gapless queue transitions (the next track pre-buffers ~20s early),
+seeking, volume, and Media Session controls. Plays made in the app are recorded
+server-side into `data/app-plays.db` (20s minimum, Spotify-style) and the
+Overview merges them with Spotify plays: daily stacked listening, listening
+clock, day rhythm, heavy rotation, and a lifetime chart once the GDPR history
+import lands. Playback controls resolve against the local
 Jellyfin library; an item that is merely known to Spotify is never presented as
 successfully playable.
 
