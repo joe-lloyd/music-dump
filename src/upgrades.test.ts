@@ -292,3 +292,34 @@ test('installed files become local library tracks and albums, whatever the upgra
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('removing a batch parent forgets its generated tracks and reports their files', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'remove-'));
+  const store = new UpgradeStore(path.join(dir, 'upgrades.db'));
+  try {
+    const parent = store.create({
+      sourceUrl: 'https://youtu.be/abc123', downloader: 'yt-dlp', sourceMode: 'chapters',
+      artist: 'Local Signals', title: 'Night Drive', album: 'Night Drive',
+    });
+    const claimed = store.claim('eliot')!;
+    store.finishBatch({
+      id: parent.id, claimToken: claimed.claim_token!, resultPath: '/data/library/music/_YouTube/x',
+      tracks: [1, 2].map((n) => ({
+        artist: 'Local Signals', title: `Track ${n}`, album: 'Night Drive', trackNumber: n,
+        currentPath: `/data/library/music/_YouTube/x/0${n}.opus`, currentCodec: 'opus', durationMs: 100_000,
+      })),
+    });
+    assert.equal(store.localTracks().length, 2);
+
+    const result = store.remove(parent.id);
+    assert.equal(result.removed, 3, 'the parent and both children are gone');
+    assert.equal(result.paths.length, 2, 'installed files are reported for cleanup');
+    assert.ok(result.paths.every((p) => p.endsWith('.opus')));
+    assert.equal(store.localTracks().length, 0, 'nothing lingers in the local library');
+    assert.equal(store.get(parent.id), null);
+    assert.throws(() => store.remove(parent.id), /not found/);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

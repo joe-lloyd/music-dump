@@ -826,6 +826,21 @@ const server = http.createServer(async (req, res) => {
       }
       return;
     }
+    if (url.pathname === '/api/upgrades/delete') {
+      if (req.method !== 'POST') {
+        json(res, 405, { error: 'method not allowed' }, { allow: 'POST' });
+        return;
+      }
+      try {
+        const body = await readJson(req);
+        const id = Number(body.id);
+        if (!Number.isInteger(id) || id < 1) throw new Error('a valid job id is required');
+        json(res, 200, upgrades.remove(id));
+      } catch (err) {
+        json(res, 409, { error: (err as Error).message });
+      }
+      return;
+    }
     if (url.pathname === '/api/upgrades/retry' || url.pathname === '/api/upgrades/cancel') {
       if (req.method !== 'POST') {
         json(res, 405, { error: 'method not allowed' }, { allow: 'POST' });

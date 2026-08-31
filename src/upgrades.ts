@@ -120,6 +120,10 @@ export function validWorkerToken(configured: string, supplied: string): boolean 
  * outside spotify.db: the exporter owns that database, while this is mutable
  * application state with a different backup/retention lifecycle.
  */
+// Lossy containers the intake can hand back; kept in step with the worker's
+// INTAKE_CODECS. Lossless never appears here - that is what an upgrade produces.
+export const INTAKE_CODECS = new Set(['mp3', 'opus', 'aac', 'vorbis']);
+
 export interface LocalTrack {
   id: string;            // "localtrack-<queue id>"
   album_id: string;      // "localalbum-<slug>"
@@ -527,8 +531,11 @@ export class UpgradeStore {
     if (input.tracks.some((track) => !Number.isFinite(track.durationMs) || track.durationMs <= 0)) {
       throw new Error('every batch track requires a positive duration');
     }
-    if (input.tracks.some((track) => !track.currentPath.trim() || track.currentCodec.trim().toLowerCase() !== 'mp3')) {
-      throw new Error('every batch track must reference an imported MP3');
+    // Intake keeps the source codec rather than re-encoding to MP3, so accept
+    // any lossy container the worker can produce. Lossless is rejected here
+    // because a batch track is by definition still awaiting its upgrade.
+    if (input.tracks.some((track) => !track.currentPath.trim() || !INTAKE_CODECS.has(track.currentCodec.trim().toLowerCase()))) {
+      throw new Error(`every batch track must reference an imported file (${[...INTAKE_CODECS].sort().join(', ')})`);
     }
 
     const at = nowIso(this.now);
@@ -594,6 +601,32 @@ export class UpgradeStore {
       WHERE id = ?
     `).run(phase, phase === 'source' ? 'pending_source' : 'queued', maxAttempts, phase, at, at, id);
     return this.get(id)!;
+  }
+
+  // Forget an import entirely: the queue row and, for a batch parent, every
+  // track it generated. Returns the installed paths so the caller can clean
+  // the files up - this store never touches the filesystem itself.
+  remove(id: number): { removed: number; paths: string[] } {
+    const job = this.get(id);
+    if (!job) throw new Error('upgrade job not found');
+    const family = [job, ...(this.db.prepare(
+      'SELECT * FROM upgrade_queue WHERE parent_id = ?',
+    ).all(id) as Record<string, unknown>[]).map(asJob)];
+    if (family.some((row) => row.status === 'working')) {
+      throw new Error('an active worker owns this job');
+    }
+    const paths = family.map((row) => row.current_path).filter((value): value is string => Boolean(value));
+    const remove = this.db.prepare('DELETE FROM upgrade_queue WHERE id = ? OR parent_id = ?');
+    const run = this.db.prepare('BEGIN');
+    run.run();
+    try {
+      remove.run(id, id);
+      this.db.prepare('COMMIT').run();
+    } catch (err) {
+      this.db.prepare('ROLLBACK').run();
+      throw err;
+    }
+    return { removed: family.length, paths };
   }
 
   cancel(id: number): UpgradeJob {
