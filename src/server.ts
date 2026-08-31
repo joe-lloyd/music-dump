@@ -8,7 +8,9 @@ import { Readable } from 'node:stream';
 import { JellyfinBridge, type TasteTrack } from './jellyfin.ts';
 import { LyricsService } from './lyrics.ts';
 import { APP_PLAYS_FILE, PlaysStore } from './plays.ts';
-import { UpgradeStore, type UpgradeJob, validWorkerToken } from './upgrades.ts';
+import {
+  UpgradeStore, type BatchTrack, type SourceMode, type UpgradeJob, validWorkerToken,
+} from './upgrades.ts';
 
 const ROOT = path.join(import.meta.dirname, '..');
 const DB_FILE = process.env.SPOTIFY_DB ?? path.join(ROOT, 'data', 'spotify.db');
@@ -77,6 +79,15 @@ function validSourceUrl(value: string): boolean {
   try {
     const url = new URL(value);
     return url.protocol === 'https:' && SOURCE_HOSTS.has(url.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+function isYouTubeUrl(value: string): boolean {
+  try {
+    const host = new URL(value).hostname.toLowerCase();
+    return ['youtube.com', 'www.youtube.com', 'music.youtube.com', 'youtu.be', 'www.youtu.be'].includes(host);
   } catch {
     return false;
   }
@@ -614,9 +625,15 @@ const server = http.createServer(async (req, res) => {
       try {
         const body = await readJson(req);
         const suppliedUrl = String(body.sourceUrl ?? '').trim();
+        const sourceMode = String(body.sourceMode ?? 'single') as SourceMode;
+        if (!['single', 'playlist', 'chapters'].includes(sourceMode)) {
+          throw new Error('sourceMode must be single, playlist, or chapters');
+        }
+        const isBatch = sourceMode !== 'single';
         const explicitTrackId = String(body.trackId ?? '').trim();
+        if (isBatch && explicitTrackId) throw new Error('album intake cannot target one Spotify track');
         let trackId = explicitTrackId;
-        if (!trackId && suppliedUrl) {
+        if (!isBatch && !trackId && suppliedUrl) {
           try {
             const source = new URL(suppliedUrl);
             const spotifyTrack = source.hostname === 'open.spotify.com'
@@ -639,6 +656,10 @@ const server = http.createServer(async (req, res) => {
           json(res, 422, { error: 'sourceUrl must be an https Spotify or YouTube URL' });
           return;
         }
+        if (isBatch && !isYouTubeUrl(sourceUrl)) {
+          json(res, 422, { error: 'playlist and chapter intake require a YouTube URL' });
+          return;
+        }
         const downloader = String(body.downloader ?? 'auto');
         if (!['auto', 'yt-dlp', 'spotdl'].includes(downloader)) {
           json(res, 422, { error: 'downloader must be auto, yt-dlp, or spotdl' });
@@ -652,13 +673,20 @@ const server = http.createServer(async (req, res) => {
         if (track) {
           try { match = await jellyfin.match(track); } catch { /* archive asleep or unconfigured */ }
         }
+        const artist = track?.artists ?? String(body.artist ?? '');
+        const album = track?.album ?? String(body.album ?? '');
+        const title = track?.name ?? String(body.title ?? '');
+        if (isBatch && (!artist.trim() || !album.trim())) {
+          throw new Error('artist and album are required for playlist or chapter intake');
+        }
         const created = upgrades.create({
           trackId: track?.id ?? null,
           sourceUrl,
-          downloader: downloader as 'auto' | 'yt-dlp' | 'spotdl',
-          artist: track?.artists ?? String(body.artist ?? ''),
-          title: track?.name ?? String(body.title ?? ''),
-          album: track?.album ?? String(body.album ?? ''),
+          downloader: isBatch ? 'yt-dlp' : downloader as 'auto' | 'yt-dlp' | 'spotdl',
+          sourceMode,
+          artist,
+          title: isBatch ? album : title,
+          album,
           durationMs: track?.duration_ms ?? (Number(body.durationMs ?? 0) || null),
           currentPath: match?.path ?? null,
           currentCodec: match?.container ?? null,
@@ -701,15 +729,43 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       try {
-        const body = await readJson(req);
+        const body = await readJson(req, 512_000);
         if (url.pathname.endsWith('/claim')) {
           const job = upgrades.claim(String(body.workerId ?? ''), Number(body.leaseSeconds ?? 7_200));
           json(res, 200, { job });
           return;
         }
         const outcome = String(body.outcome ?? '');
-        if (!['source_ready', 'upgraded', 'already_lossless', 'failed'].includes(outcome)) {
+        if (!['source_ready', 'batch_ready', 'upgraded', 'already_lossless', 'failed'].includes(outcome)) {
           throw new Error('invalid completion outcome');
+        }
+        if (outcome === 'batch_ready') {
+          if (!Array.isArray(body.tracks)) throw new Error('batch_ready requires tracks');
+          const result = upgrades.finishBatch({
+            id: Number(body.id),
+            claimToken: String(body.claimToken ?? ''),
+            resultPath: String(body.resultPath ?? ''),
+            tracks: body.tracks.map((raw) => {
+              if (!raw || Array.isArray(raw) || typeof raw !== 'object') throw new Error('invalid batch track');
+              const track = raw as Record<string, unknown>;
+              return {
+                sourceUrl: track.sourceUrl == null ? null : String(track.sourceUrl),
+                artist: String(track.artist ?? ''),
+                title: String(track.title ?? ''),
+                album: String(track.album ?? ''),
+                durationMs: Number(track.durationMs ?? 0),
+                currentPath: String(track.currentPath ?? ''),
+                currentCodec: String(track.currentCodec ?? ''),
+                trackNumber: Number(track.trackNumber ?? 0),
+              } satisfies BatchTrack;
+            }),
+          });
+          void jellyfin.refreshLibrary().catch((err) => console.error('Jellyfin refresh:', (err as Error).message));
+          json(res, 200, {
+            job: publicUpgrade(result.job),
+            children: result.children.map(publicUpgrade),
+          });
+          return;
         }
         const job = upgrades.finish({
           id: Number(body.id),

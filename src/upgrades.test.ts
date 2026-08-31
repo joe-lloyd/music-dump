@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { UpgradeStore, isLosslessCodec, validWorkerToken } from './upgrades.ts';
 
@@ -21,6 +22,41 @@ test('recognizes real lossless codecs, not a filename extension', () => {
   assert.equal(isLosslessCodec('alac'), true);
   assert.equal(isLosslessCodec('mp3'), false);
   assert.equal(isLosslessCodec(null), false);
+});
+
+test('migrates the deployed single-track queue schema additively', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'upgrades-legacy-'));
+  const file = path.join(dir, 'queue.db');
+  const legacy = new DatabaseSync(file);
+  legacy.exec(`
+    CREATE TABLE upgrade_queue (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      track_id TEXT, source_url TEXT,
+      downloader TEXT NOT NULL DEFAULT 'auto',
+      artist TEXT NOT NULL, title TEXT NOT NULL, album TEXT, duration_ms INTEGER,
+      current_path TEXT, current_codec TEXT, phase TEXT NOT NULL, status TEXT NOT NULL,
+      source_attempts INTEGER NOT NULL DEFAULT 0,
+      upgrade_attempts INTEGER NOT NULL DEFAULT 0,
+      max_attempts INTEGER NOT NULL DEFAULT 6,
+      next_attempt_at TEXT, last_error TEXT, result_path TEXT,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      claimed_by TEXT, claim_token TEXT, claim_expires_at TEXT
+    );
+  `);
+  legacy.close();
+
+  const store = new UpgradeStore(file);
+  try {
+    const columns = new Set((store.db.prepare('PRAGMA table_info(upgrade_queue)').all() as { name: string }[])
+      .map((column) => column.name));
+    assert.equal(columns.has('source_mode'), true);
+    assert.equal(columns.has('parent_id'), true);
+    assert.equal(columns.has('track_number'), true);
+    assert.equal(columns.has('batch_size'), true);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('queues source acquisition only when no local file exists', () => {
@@ -79,6 +115,76 @@ test('claims source, promotes it to the upgrade queue, and completes atomically'
     });
     assert.equal(done.status, 'upgraded');
     assert.equal(f.store.claim('eliot'), null);
+  } finally {
+    f.close();
+  }
+});
+
+test('expands a YouTube album into linked per-track FLAC jobs atomically', () => {
+  const f = fixture();
+  try {
+    const parent = f.store.create({
+      sourceUrl: 'https://www.youtube.com/playlist?list=album', downloader: 'yt-dlp',
+      sourceMode: 'playlist', artist: 'Local Signals', title: 'Night Drive', album: 'Night Drive',
+      maxAttempts: 4,
+    });
+    const claimed = f.store.claim('eliot')!;
+    assert.equal(claimed.id, parent.id);
+    assert.equal(claimed.source_mode, 'playlist');
+
+    const expanded = f.store.finishBatch({
+      id: parent.id,
+      claimToken: claimed.claim_token!,
+      resultPath: '/data/library/music/_YouTube/Local Signals/Night Drive',
+      tracks: [
+        {
+          sourceUrl: 'https://youtu.be/one', artist: 'Local Signals', title: 'Streetlight Frequency',
+          album: 'Night Drive', durationMs: 201_000,
+          currentPath: '/data/library/music/_YouTube/Local Signals/Night Drive/01 - Streetlight Frequency.mp3',
+          currentCodec: 'mp3', trackNumber: 1,
+        },
+        {
+          sourceUrl: 'https://youtu.be/two', artist: 'Local Signals', title: 'Half Awake',
+          album: 'Night Drive', durationMs: 218_000,
+          currentPath: '/data/library/music/_YouTube/Local Signals/Night Drive/02 - Half Awake.mp3',
+          currentCodec: 'mp3', trackNumber: 2,
+        },
+      ],
+    });
+
+    assert.equal(expanded.job.status, 'upgraded');
+    assert.equal(expanded.job.batch_size, 2);
+    assert.deepEqual(expanded.children.map((job) => [job.parent_id, job.track_number, job.status]), [
+      [parent.id, 1, 'queued'], [parent.id, 2, 'queued'],
+    ]);
+    assert.equal(f.store.claim('eliot')?.id, expanded.children[0].id);
+  } finally {
+    f.close();
+  }
+});
+
+test('rejects an invalid album expansion without inserting partial children', () => {
+  const f = fixture();
+  try {
+    const parent = f.store.create({
+      sourceUrl: 'https://youtu.be/album', sourceMode: 'chapters', downloader: 'yt-dlp',
+      artist: 'Local Signals', title: 'Night Drive', album: 'Night Drive',
+    });
+    const claimed = f.store.claim('eliot')!;
+    assert.throws(() => f.store.finishBatch({
+      id: parent.id, claimToken: claimed.claim_token!, resultPath: '/music/album', tracks: [
+        {
+          artist: 'Local Signals', title: 'One', album: 'Night Drive', durationMs: 100_000,
+          currentPath: '/music/01.mp3', currentCodec: 'mp3', trackNumber: 1,
+        },
+        {
+          artist: 'Local Signals', title: 'Two', album: 'Night Drive', durationMs: 100_000,
+          currentPath: '/music/02.mp3', currentCodec: 'mp3', trackNumber: 1,
+        },
+      ],
+    }), /track numbers/);
+    assert.equal(f.store.list().jobs.length, 1);
+    assert.equal(f.store.get(parent.id)?.status, 'working');
   } finally {
     f.close();
   }

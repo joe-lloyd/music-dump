@@ -646,17 +646,20 @@ const views = {
       exhausted: 'retries exhausted', cancelled: 'cancelled',
     };
     const rows = (d.jobs ?? []).map((j) => {
+      const batch = j.source_mode && j.source_mode !== 'single';
       const due = j.next_attempt_at && ['retry_wait', 'queued', 'pending_source'].includes(j.status)
         ? ` &middot; ${j.status === 'retry_wait' ? 'retry ' : ''}${until(j.next_attempt_at)}` : '';
-      const tries = j.phase === 'source' ? `${j.source_attempts}/3 source tries` : `${j.upgrade_attempts}/${j.max_attempts} FLAC tries`;
+      const tries = batch && j.status === 'upgraded'
+        ? `${j.batch_size ?? 0} tracks imported and queued for FLAC`
+        : j.phase === 'source' ? `${j.source_attempts}/3 source tries` : `${j.upgrade_attempts}/${j.max_attempts} FLAC tries`;
       const controls = j.status === 'exhausted'
         ? `<button type="button" data-upgrade-retry="${j.id}">Retry now</button>`
         : ['pending_source', 'queued', 'retry_wait'].includes(j.status)
           ? `<button type="button" data-upgrade-cancel="${j.id}">Cancel</button>` : '';
       return `<div class="upgrade-row">
-        <span class="upgrade-state ${esc(j.status)}">${esc(statusLabel[j.status] ?? j.status)}</span>
+        <span class="upgrade-state ${esc(j.status)}">${esc(batch && j.status === 'upgraded' ? 'album imported' : statusLabel[j.status] ?? j.status)}</span>
         <div class="mid"><b>${esc(j.title)}</b><span>${esc(j.artist)}${j.album ? ` &middot; ${esc(j.album)}` : ''}</span>
-          <small>${tries}${due}${j.current_codec ? ` &middot; now ${esc(j.current_codec.toUpperCase())}` : ''}</small>
+          <small>${j.track_number ? `track ${j.track_number} &middot; ` : ''}${batch ? `${esc(j.source_mode)} &middot; ` : ''}${tries}${due}${j.current_codec ? ` &middot; now ${esc(j.current_codec.toUpperCase())}` : ''}</small>
           ${j.last_error ? `<em>${esc(j.last_error)}</em>` : ''}</div>
         <div class="upgrade-actions">${controls}</div>
       </div>`;
@@ -668,13 +671,18 @@ const views = {
       </div>
       <form class="upgrade-form" id="upgrade-form">
         <label><span>Spotify or YouTube URL</span><input name="sourceUrl" type="url" required placeholder="https://open.spotify.com/track/..."></label>
+        <label><span>Source type</span><select name="sourceMode" id="upgrade-source-mode">
+          <option value="single">Single track</option>
+          <option value="playlist">YouTube playlist</option>
+          <option value="chapters">Chaptered video</option>
+        </select></label>
         <label><span>Artist <small>(needed for YouTube)</small></span><input name="artist" placeholder="Artist"></label>
-        <label><span>Title <small>(needed for YouTube)</small></span><input name="title" placeholder="Song title"></label>
-        <label><span>Album <small>(optional)</small></span><input name="album" placeholder="Album"></label>
+        <label><span>Title <small>(single track)</small></span><input name="title" placeholder="Song title"></label>
+        <label><span>Album <small>(required for album intake)</small></span><input name="album" placeholder="Album"></label>
         <label><span>FLAC attempts</span><input name="maxAttempts" type="number" min="1" max="20" value="6"></label>
         <button class="primary-action" type="submit">Add to archive + FLAC queue</button>
       </form>
-      <div class="note">Spotify tracks already known to this archive fill their own metadata. For a new Spotify or YouTube link, enter artist/title. Retry waits use exponential backoff with jitter; Retry now grants one more attempt after exhaustion.</div>
+      <div class="note" id="upgrade-source-note">Spotify tracks already known to this archive fill their own metadata. For a new Spotify or YouTube link, enter artist/title. YouTube album modes require artist + album and refuse partial playlists or videos without at least two valid chapters.</div>
       <h2>Upgrade queue</h2><div class="upgrade-list">${rows || '<div class="empty">nothing queued yet</div>'}</div>`;
   },
 
@@ -845,7 +853,23 @@ const after = {
       if (!response.ok) throw new Error(data.error || `request failed (${response.status})`);
       return data;
     };
-    $('#upgrade-form', el).addEventListener('submit', async (event) => {
+    const form = $('#upgrade-form', el);
+    const mode = $('#upgrade-source-mode', el);
+    const syncMode = () => {
+      const batch = mode.value !== 'single';
+      form.elements.title.disabled = batch;
+      form.elements.album.required = batch;
+      form.elements.artist.required = batch;
+      form.elements.sourceUrl.placeholder = batch
+        ? (mode.value === 'playlist' ? 'https://www.youtube.com/playlist?list=...' : 'https://youtu.be/...')
+        : 'https://open.spotify.com/track/...';
+      form.querySelector('button[type=submit]').textContent = batch
+        ? 'Import album + queue every track for FLAC'
+        : 'Add to archive + FLAC queue';
+    };
+    mode.addEventListener('change', syncMode);
+    syncMode();
+    form.addEventListener('submit', async (event) => {
       event.preventDefault();
       const button = event.currentTarget.querySelector('button[type=submit]');
       button.disabled = true;
@@ -853,7 +877,7 @@ const after = {
         const values = Object.fromEntries(new FormData(event.currentTarget));
         values.maxAttempts = Number(values.maxAttempts);
         await post('/api/upgrades', values);
-        notice('Added to the archive and FLAC queue');
+        notice(values.sourceMode === 'single' ? 'Added to the archive and FLAC queue' : 'Album intake queued');
         show();
       } catch (err) {
         notice(err.message, true);

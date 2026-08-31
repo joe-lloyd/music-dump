@@ -109,20 +109,24 @@ to seek, and a per-track ±0.5 s nudge (persisted in the browser) corrects
 drifting timing. Plain lyrics render without fake timing; instrumentals and
 no-matches stay quiet.
 
-## MP3 intake and automatic FLAC upgrades
+## MP3/album intake and automatic FLAC upgrades
 
 The **FLAC queue** tab closes the gap between "I want this song now" and "a
 verified lossless copy exists somewhere":
 
 1. Queue any Spotify-backed track with its small `FLAC up` control, or paste a
    Spotify/YouTube URL in the FLAC queue. Known Spotify tracks supply their own
-   artist/title/album metadata; new links require artist + title.
+   artist/title/album metadata; new single-track links require artist + title.
+   For a YouTube album, choose **YouTube playlist** or **Chaptered video** and
+   supply the album artist + album title.
 2. The app writes the request to `data/upgrades.db`, separate from the
    exporter-owned `spotify.db`. Queue claims use leases, so a worker crash does
    not strand an item in `working` forever.
 3. The scheduled worker on `eliot` downloads an initial MP3 with spotDL (Spotify)
-   or yt-dlp (YouTube) if Jellyfin does not already have a local file. It then
-   searches Soulseek through slskd for FLAC candidates.
+   or yt-dlp (YouTube) if Jellyfin does not already have a local file. YouTube
+   playlists are imported in playlist order; long videos use yt-dlp's internal
+   chapters. Each generated track becomes its own durable FLAC job. The worker
+   then searches Soulseek through slskd for FLAC candidates.
 4. A replacement is accepted only when ffprobe confirms the codec is actually
    FLAC and duration + artist + title match. The FLAC is copied and verified on
    the library filesystem before the old lossy file is moved to the recoverable
@@ -140,6 +144,13 @@ creation never exposes that token to the browser. Source URLs are restricted to
 HTTPS Spotify and YouTube hosts and all downloader commands use argument arrays,
 not a shell. See the HomeLab repository's `eliot/acquisition/music-upgrader/`
 for the worker, slskd container, systemd timer, and deployment checklist.
+
+Album expansion is atomic in the queue: the parent is only marked imported once
+all generated MP3s have been validated and every child upgrade row can be
+inserted. A playlist with an unavailable entry, a video without at least two
+valid chapters, or a split whose file count differs from the chapter count fails
+intake instead of silently importing a partial album. Album files live under
+`_YouTube/<Artist>/<Album>/<track> - <title>.mp3` with canonical tags.
 
 ## Local playback through Jellyfin
 

@@ -7,6 +7,7 @@ export const UPGRADES_FILE = process.env.UPGRADES_DB
   ?? path.join(import.meta.dirname, '..', 'data', 'upgrades.db');
 
 export type UpgradePhase = 'source' | 'upgrade';
+export type SourceMode = 'single' | 'playlist' | 'chapters';
 export type UpgradeStatus =
   | 'pending_source'
   | 'queued'
@@ -22,6 +23,10 @@ export interface UpgradeJob {
   track_id: string | null;
   source_url: string | null;
   downloader: 'auto' | 'yt-dlp' | 'spotdl';
+  source_mode: SourceMode;
+  parent_id: number | null;
+  track_number: number | null;
+  batch_size: number | null;
   artist: string;
   title: string;
   album: string | null;
@@ -47,6 +52,9 @@ export interface CreateUpgrade {
   trackId?: string | null;
   sourceUrl?: string | null;
   downloader?: 'auto' | 'yt-dlp' | 'spotdl';
+  sourceMode?: SourceMode;
+  parentId?: number | null;
+  trackNumber?: number | null;
   artist: string;
   title: string;
   album?: string | null;
@@ -65,6 +73,24 @@ export interface FinishUpgrade {
   currentPath?: string | null;
   currentCodec?: string | null;
   resultPath?: string | null;
+}
+
+export interface BatchTrack {
+  sourceUrl?: string | null;
+  artist: string;
+  title: string;
+  album: string;
+  durationMs: number;
+  currentPath: string;
+  currentCodec: string;
+  trackNumber: number;
+}
+
+export interface FinishBatch {
+  id: number;
+  claimToken: string;
+  resultPath: string;
+  tracks: BatchTrack[];
 }
 
 const LOSSLESS = new Set(['flac', 'alac', 'ape', 'wavpack', 'wv']);
@@ -119,6 +145,11 @@ export class UpgradeStore {
         source_url TEXT,
         downloader TEXT NOT NULL DEFAULT 'auto'
           CHECK (downloader IN ('auto', 'yt-dlp', 'spotdl')),
+        source_mode TEXT NOT NULL DEFAULT 'single'
+          CHECK (source_mode IN ('single', 'playlist', 'chapters')),
+        parent_id INTEGER REFERENCES upgrade_queue(id),
+        track_number INTEGER,
+        batch_size INTEGER,
         artist TEXT NOT NULL,
         title TEXT NOT NULL,
         album TEXT,
@@ -164,6 +195,28 @@ export class UpgradeStore {
         WHERE track_id IS NOT NULL
           AND status NOT IN ('upgraded', 'already_lossless', 'exhausted', 'cancelled');
     `);
+
+    // Existing deployments already have upgrade_queue. Keep migrations
+    // additive so a web-container restart upgrades the durable queue in place.
+    const columns = new Set((this.db.prepare('PRAGMA table_info(upgrade_queue)').all() as { name: string }[])
+      .map((column) => column.name));
+    if (!columns.has('source_mode')) {
+      this.db.exec("ALTER TABLE upgrade_queue ADD COLUMN source_mode TEXT NOT NULL DEFAULT 'single' CHECK (source_mode IN ('single', 'playlist', 'chapters'))");
+    }
+    if (!columns.has('parent_id')) {
+      this.db.exec('ALTER TABLE upgrade_queue ADD COLUMN parent_id INTEGER REFERENCES upgrade_queue(id)');
+    }
+    if (!columns.has('track_number')) {
+      this.db.exec('ALTER TABLE upgrade_queue ADD COLUMN track_number INTEGER');
+    }
+    if (!columns.has('batch_size')) {
+      this.db.exec('ALTER TABLE upgrade_queue ADD COLUMN batch_size INTEGER');
+    }
+    this.db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_upgrade_parent_track
+        ON upgrade_queue(parent_id, track_number)
+        WHERE parent_id IS NOT NULL;
+    `);
   }
 
   close(): void {
@@ -175,6 +228,12 @@ export class UpgradeStore {
     const title = input.title.trim();
     if (!artist || !title) throw new Error('artist and title are required');
     if (!input.sourceUrl && !input.currentPath) throw new Error('a source URL or existing local file is required');
+    const sourceMode = input.sourceMode ?? 'single';
+    if (!['single', 'playlist', 'chapters'].includes(sourceMode)) throw new Error('invalid source mode');
+    const parentId = input.parentId == null ? null : Math.trunc(input.parentId);
+    const trackNumber = input.trackNumber == null ? null : Math.trunc(input.trackNumber);
+    if (parentId != null && parentId < 1) throw new Error('parentId must be positive');
+    if (trackNumber != null && trackNumber < 1) throw new Error('trackNumber must be positive');
 
     const maxAttempts = Math.max(1, Math.min(20, Math.trunc(input.maxAttempts ?? 6)));
     const currentCodec = input.currentCodec?.trim().toLowerCase() || null;
@@ -187,14 +246,18 @@ export class UpgradeStore {
     try {
       const result = this.db.prepare(`
         INSERT INTO upgrade_queue (
-          track_id, source_url, downloader, artist, title, album, duration_ms,
+          track_id, source_url, downloader, source_mode, parent_id, track_number,
+          artist, title, album, duration_ms,
           current_path, current_codec, phase, status, max_attempts,
           next_attempt_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         input.trackId?.trim() || null,
         input.sourceUrl?.trim() || null,
         input.downloader ?? 'auto',
+        sourceMode,
+        parentId,
+        trackNumber,
         artist,
         title,
         input.album?.trim() || null,
@@ -212,6 +275,9 @@ export class UpgradeStore {
     } catch (err) {
       if (/UNIQUE constraint failed: upgrade_queue\.track_id/i.test((err as Error).message)) {
         throw new Error('this track is already in the active upgrade queue');
+      }
+      if (/UNIQUE constraint failed: upgrade_queue\.parent_id, upgrade_queue\.track_number/i.test((err as Error).message)) {
+        throw new Error('this batch track is already in the upgrade queue');
       }
       throw err;
     }
@@ -381,6 +447,73 @@ export class UpgradeStore {
       `).run(at, input.outcome, error, input.candidate?.trim() || null, job.id);
       this.db.exec('COMMIT');
       return this.get(job.id)!;
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  finishBatch(input: FinishBatch): { job: UpgradeJob; children: UpgradeJob[] } {
+    if (!Array.isArray(input.tracks) || input.tracks.length < 2 || input.tracks.length > 500) {
+      throw new Error('a batch must contain between 2 and 500 tracks');
+    }
+    const resultPath = input.resultPath.trim();
+    if (!resultPath) throw new Error('batch completion requires resultPath');
+    const numbers = input.tracks.map((track) => Math.trunc(track.trackNumber));
+    if (numbers.some((number) => !Number.isInteger(number) || number < 1)
+        || new Set(numbers).size !== numbers.length) {
+      throw new Error('batch track numbers must be unique positive integers');
+    }
+    if (input.tracks.some((track) => !track.artist.trim() || !track.title.trim() || !track.album.trim())) {
+      throw new Error('every batch track requires artist, title, and album');
+    }
+    if (input.tracks.some((track) => !Number.isFinite(track.durationMs) || track.durationMs <= 0)) {
+      throw new Error('every batch track requires a positive duration');
+    }
+    if (input.tracks.some((track) => !track.currentPath.trim() || track.currentCodec.trim().toLowerCase() !== 'mp3')) {
+      throw new Error('every batch track must reference an imported MP3');
+    }
+
+    const at = nowIso(this.now);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const parent = this.get(input.id);
+      if (!parent || parent.status !== 'working' || !parent.claim_token || parent.claim_token !== input.claimToken) {
+        throw new Error('job is not owned by this worker lease');
+      }
+      if (parent.phase !== 'source' || parent.source_mode === 'single') {
+        throw new Error('only a playlist or chapter source can complete as a batch');
+      }
+
+      const children = input.tracks.map((track) => this.create({
+        sourceUrl: track.sourceUrl ?? parent.source_url,
+        downloader: 'yt-dlp',
+        sourceMode: 'single',
+        parentId: parent.id,
+        trackNumber: track.trackNumber,
+        artist: track.artist,
+        title: track.title,
+        album: track.album,
+        durationMs: track.durationMs,
+        currentPath: track.currentPath,
+        currentCodec: track.currentCodec,
+        maxAttempts: parent.max_attempts,
+      }));
+
+      this.db.prepare(`
+        UPDATE upgrade_queue
+        SET status = 'upgraded', next_attempt_at = NULL, last_error = NULL,
+            result_path = ?, batch_size = ?, updated_at = ?,
+            claimed_by = NULL, claim_token = NULL, claim_expires_at = NULL
+        WHERE id = ?
+      `).run(resultPath, children.length, at, parent.id);
+      this.db.prepare(`
+        UPDATE upgrade_attempts
+        SET finished_at = ?, outcome = 'batch_ready', error = NULL
+        WHERE id = (SELECT id FROM upgrade_attempts WHERE queue_id = ? AND finished_at IS NULL ORDER BY id DESC LIMIT 1)
+      `).run(at, parent.id);
+      this.db.exec('COMMIT');
+      return { job: this.get(parent.id)!, children };
     } catch (err) {
       this.db.exec('ROLLBACK');
       throw err;
