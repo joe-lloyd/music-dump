@@ -664,26 +664,26 @@ const views = {
         songCard(p, p.source === 'app' ? `here &middot; ${ago(p.played_at)}` : ago(p.played_at))).join('')}</div>`;
   },
 
-  // One feed of everything that most recently entered the library, whether
-  // it arrived by saving on Spotify, liking a song, or importing here.
+  // Newest finished downloads: whatever most recently landed on disk,
+  // from Lidarr or from an import here.
   async latest() {
     const rows = await api('/api/latest');
-    if (!rows.length) return '<div class="empty">nothing added yet</div>';
-    const label = { album: 'saved album', song: 'liked song', imported: 'imported here' };
-    return `<div class="song-grid">${rows.map((row) => {
-      const isAlbum = row.kind !== 'song';
-      const href = isAlbum ? `#album/${row.id}` : (row.album_id ? `#album/${row.album_id}` : null);
-      return `<div class="song-card">
-        ${row.kind === 'song' ? playControl({ id: row.id, name: row.name, artists: row.artists }) : '<span class="song-spacer"></span>'}
-        ${href ? `<a href="${href}">` : ''}${pic('albums', isAlbum ? row.id : row.album_id, row.image_url, row.name)}${href ? '</a>' : ''}
-        <div class="song-main">
-          <b>${href ? `<a href="${href}">${esc(row.name)}</a>` : esc(row.name)}</b>
-          <span class="song-sub">${esc(row.artists ?? '')}</span>
-          <span class="song-album">${label[row.kind] ?? row.kind}${row.total_tracks ? ` &middot; ${row.total_tracks} tracks` : ''}${row.downloaded ? ` &middot; ${DL}` : ''}</span>
-        </div>
-        <div class="song-end"><span class="song-dur">${ago(row.added_at)}</span></div>
-      </div>`;
-    }).join('')}</div>`;
+    if (!rows.length) return '<div class="empty">nothing downloaded yet — or the archive is asleep</div>';
+    const label = { download: 'downloaded', imported: 'imported here', single: 'single' };
+    return `<p class="note">Newest arrivals in the local library, by when the files landed.</p>
+      <div class="song-grid">${rows.map((row) => {
+        const href = row.album_id ? `#album/${row.album_id}` : null;
+        return `<div class="song-card">
+          <span class="song-spacer"></span>
+          ${href ? `<a href="${href}">` : ''}${pic('albums', row.album_id, row.image_url, row.name)}${href ? '</a>' : ''}
+          <div class="song-main">
+            <b>${href ? `<a href="${href}">${esc(row.name)}</a>` : esc(row.name)}</b>
+            <span class="song-sub">${esc(row.artists ?? '')}</span>
+            <span class="song-album">${DL} ${label[row.kind] ?? row.kind}</span>
+          </div>
+          <div class="song-end"><span class="song-dur">${ago(row.added_at)}</span></div>
+        </div>`;
+      }).join('')}</div>`;
   },
 
   async shows() {
@@ -1200,7 +1200,7 @@ const PAGE_COPY = {
   overview: ['Your listening memory', 'The collection'], artists: ['Everyone in your orbit', 'Artists'],
   liked: ['Saved, remembered, searchable', 'Songs'], albums: ['The record shelf', 'Albums'],
   playlists: ['Your hand-built paths', 'Playlists'], top: ['Listening, counted honestly', 'Your top music'],
-  latest: ['Freshly in the library', 'Latest additions'],
+  latest: ['Freshly on disk', 'Latest downloads'],
   shows: ['Artists leaving the speakers', 'Upcoming shows'], upgrades: ['Lossless, eventually', 'FLAC upgrade queue'],
   plays: ['The latest signals', 'Recently played'],
 };

@@ -2,7 +2,7 @@
 // player history and the lossless-upgrade queue. Zero runtime dependencies.
 import http from 'node:http';
 import path from 'node:path';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { Readable } from 'node:stream';
 import { JellyfinBridge, LOCAL_LIBRARY_PREFIX, type TasteTrack } from './jellyfin.ts';
@@ -117,6 +117,92 @@ function localAlbums(): { id: string; name: string; artists: string; total_track
     }
   }
   return [...albums.values()].sort((a, b) => b.added_at.localeCompare(a.added_at));
+}
+
+
+// "Latest" means what most recently landed on disk - a finished download -
+// not what was saved on Spotify. Directory mtime is the honest signal: it
+// moves when files are written into an album folder, whether that was Lidarr
+// or an import here. Three layouts live side by side:
+//   /music/<Artist>/<Album>/            Lidarr
+//   /music/_YouTube/<Artist>/<Album>/   album imports
+//   /music/_Singles/<Artist>/<file>     one-off imports
+const AUDIO_EXT = new Set(['.mp3', '.opus', '.m4a', '.flac', '.ogg', '.aac', '.wav', '.wv', '.ape']);
+const DOWNLOAD_TTL_MS = 5 * 60 * 1000;
+let downloadCache: { at: number; rows: Record<string, unknown>[] } | null = null;
+
+function dirs(at: string): string[] {
+  try {
+    return readdirSync(at, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch {
+    return [];
+  }
+}
+
+function mtime(at: string): number {
+  try {
+    return statSync(at).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+function latestDownloads(limit = 60): Record<string, unknown>[] {
+  if (downloadCache && Date.now() - downloadCache.at < DOWNLOAD_TTL_MS) return downloadCache.rows.slice(0, limit);
+  const rows: Record<string, unknown>[] = [];
+  const add = (name: string, artist: string, at: string, kind: string, albumId: string | null) => {
+    const when = mtime(at);
+    if (when) rows.push({ name, artists: artist, added_at: new Date(when).toISOString(), kind, album_id: albumId });
+  };
+
+  for (const top of dirs(APP_LIBRARY_PREFIX)) {
+    const topPath = path.join(APP_LIBRARY_PREFIX, top);
+    if (top === '_YouTube') {
+      for (const artist of dirs(topPath)) {
+        for (const album of dirs(path.join(topPath, artist))) {
+          add(album, artist, path.join(topPath, artist, album), 'imported', localAlbumId(artist, album));
+        }
+      }
+    } else if (top === '_Singles') {
+      for (const artist of dirs(topPath)) {
+        const artistPath = path.join(topPath, artist);
+        let files: string[] = [];
+        try {
+          files = readdirSync(artistPath).filter((f) => AUDIO_EXT.has(path.extname(f).toLowerCase()));
+        } catch { /* unreadable while eliot sleeps */ }
+        for (const file of files) {
+          add(path.parse(file).name, artist, path.join(artistPath, file), 'single', null);
+        }
+      }
+    } else {
+      for (const album of dirs(topPath)) add(album, top, path.join(topPath, album), 'download', null);
+    }
+  }
+
+  rows.sort((a, b) => String(b.added_at).localeCompare(String(a.added_at)));
+
+  // Lidarr folders are named "Album (Year) [Type]" and carry no Spotify id,
+  // so match the stripped name back to the taste DB purely to borrow its
+  // artwork. A miss just means the placeholder letter.
+  const bare = (value: string) => value.replace(/\s*[(\[].*$/, '').trim().toLowerCase();
+  const art = new Map<string, { id: string; image_url: string | null }>();
+  for (const row of query(
+    'SELECT id, name, image_url FROM albums WHERE image_url IS NOT NULL',
+  ) as { id: string; name: string; image_url: string }[]) {
+    const key = bare(row.name);
+    if (key && !art.has(key)) art.set(key, { id: row.id, image_url: row.image_url });
+  }
+  for (const row of rows) {
+    if (row.album_id) continue;
+    const found = art.get(bare(String(row.name)));
+    if (found) {
+      row.album_id = found.id;
+      row.image_url = found.image_url;
+    }
+  }
+
+  downloadCache = { at: Date.now(), rows };
+  return rows.slice(0, limit);
 }
 
 function tasteTrack(id: string): TasteTrack | null {
@@ -775,35 +861,8 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
       .slice(0, 300);
   },
 
-  // One list of what most recently entered the library, from every source.
-  '/api/latest': () => {
-    const albums = query(`
-      SELECT al.id, al.name, al.saved_at AS added_at, al.image_url, 'album' AS kind,
-             (SELECT group_concat(a.name, ', ' ORDER BY aa.position)
-                FROM album_artists aa JOIN artists a ON a.id = aa.artist_id
-               WHERE aa.album_id = al.id) AS artists,
-             (SELECT downloaded FROM album_download_status ds WHERE ds.album_id = al.id) AS downloaded
-      FROM albums al WHERE al.is_saved = 1 AND al.saved_at IS NOT NULL
-      ORDER BY al.saved_at DESC LIMIT 40`) as Record<string, unknown>[];
-    const songs = query(`
-      SELECT t.id, t.name, lt.added_at, al.image_url, 'song' AS kind, al.id AS album_id,
-             al.name AS album,
-             (SELECT group_concat(a.name, ', ' ORDER BY ta.position)
-                FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
-               WHERE ta.track_id = t.id) AS artists
-      FROM liked_tracks lt JOIN tracks t ON t.id = lt.track_id
-      LEFT JOIN albums al ON al.id = t.album_id
-      WHERE lt.removed_at IS NULL AND lt.added_at IS NOT NULL
-      ORDER BY lt.added_at DESC LIMIT 40`) as Record<string, unknown>[];
-    const imported = localAlbums().map((album) => ({
-      id: album.id, name: album.name, added_at: album.added_at, image_url: null,
-      kind: 'imported', artists: album.artists, total_tracks: album.total_tracks, downloaded: 1,
-    }));
-    return [...albums, ...songs, ...imported]
-      .filter((row) => row.added_at)
-      .sort((a, b) => String(b.added_at).localeCompare(String(a.added_at)))
-      .slice(0, 60);
-  },
+  // Newest finished downloads, by what is actually on disk.
+  '/api/latest': (params) => latestDownloads(Math.min(Number(params.get('limit') ?? 60), 200)),
 };
 
 const server = http.createServer(async (req, res) => {
