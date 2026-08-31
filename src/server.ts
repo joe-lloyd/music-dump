@@ -1010,7 +1010,17 @@ const server = http.createServer(async (req, res) => {
         try {
           const match = await jellyfin.matchPath(track.path);
           if (match) {
-            const upstream = await jellyfin.image(match.itemId);
+            // Folder/embedded art attaches to Jellyfin's album entity, not
+            // to each audio item, so prefer the album and fall back to the track.
+            let upstream: Response | null = null;
+            for (const candidate of [match.albumId, match.itemId]) {
+              if (!candidate) continue;
+              try {
+                upstream = await jellyfin.image(candidate);
+                break;
+              } catch { /* try the next one */ }
+            }
+            if (!upstream) throw new Error('no artwork');
             const body = Buffer.from(await upstream.arrayBuffer());
             res.writeHead(200, {
               'content-type': upstream.headers.get('content-type') ?? 'image/jpeg',

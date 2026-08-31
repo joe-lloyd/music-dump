@@ -36,6 +36,7 @@ interface JellyfinItemsResponse {
 
 export interface PlayerMatch {
   itemId: string;
+  albumId: string | null;
   container: string | null;
   path: string | null;
   score: number;
@@ -193,7 +194,7 @@ export class JellyfinBridge {
       const params = new URLSearchParams({
         recursive: 'true',
         includeItemTypes: 'Audio',
-        fields: 'Album,AlbumArtists,Artists,RunTimeTicks,IndexNumber,ParentIndexNumber,Container,Path',
+        fields: 'Album,AlbumArtists,AlbumId,Artists,RunTimeTicks,IndexNumber,ParentIndexNumber,Container,Path',
         enableTotalRecordCount: 'true',
         limit: '100000',
       });
@@ -233,6 +234,7 @@ export class JellyfinBridge {
     if (ranked[1] && ranked[0].score === ranked[1].score && ranked[0].score < 10) return null;
     return {
       itemId: ranked[0].item.Id,
+      albumId: ranked[0].item.AlbumId ?? null,
       container: ranked[0].item.Container ?? null,
       path: ranked[0].item.Path ?? null,
       score: ranked[0].score,
@@ -252,7 +254,7 @@ export class JellyfinBridge {
     }
     for (const candidate of candidates) {
       const item = this.byPath.get(candidate);
-      if (item) return { itemId: item.Id, container: item.Container ?? null, path: item.Path ?? null, score: 100 };
+      if (item) return { itemId: item.Id, albumId: item.AlbumId ?? null, container: item.Container ?? null, path: item.Path ?? null, score: 100 };
     }
     return null;
   }
