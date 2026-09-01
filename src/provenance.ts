@@ -203,6 +203,9 @@ export interface ProvenanceRow {
   duration_ms: number | null;
   track_number: number | null;
   disc_number: number | null;
+  folder: string | null;
+  album_id: string | null;
+  track_id: string | null;
 }
 
 export interface Badge {
@@ -284,7 +287,10 @@ export class ProvenanceStore {
           scanned_at TEXT NOT NULL,
           duration_ms INTEGER,
           track_number INTEGER,
-          disc_number INTEGER
+          disc_number INTEGER,
+          folder TEXT,
+          album_id TEXT,
+          track_id TEXT
         );
         CREATE INDEX IF NOT EXISTS provenance_key ON track_provenance(match_key);
         CREATE INDEX IF NOT EXISTS provenance_source ON track_provenance(source);
@@ -294,8 +300,37 @@ export class ProvenanceStore {
       // and must gain them in place rather than being rebuilt.
       const columns = new Set((this.db.prepare('PRAGMA table_info(track_provenance)')
         .all() as { name: string }[]).map((column) => column.name));
-      for (const [name, type] of [['duration_ms', 'INTEGER'], ['track_number', 'INTEGER'], ['disc_number', 'INTEGER']]) {
+      for (const [name, type] of [
+        ['duration_ms', 'INTEGER'], ['track_number', 'INTEGER'], ['disc_number', 'INTEGER'],
+        ['folder', 'TEXT'], ['album_id', 'TEXT'], ['track_id', 'TEXT'],
+      ]) {
         if (!columns.has(name)) this.db.exec(`ALTER TABLE track_provenance ADD COLUMN ${name} ${type}`);
+      }
+      // Indexes on the migrated columns go up only AFTER the ALTERs. Putting
+      // them in the CREATE TABLE batch above breaks every existing database:
+      // the index references a column the old table has not grown yet, the
+      // whole exec throws, and the migration that would have added it never
+      // runs. Deployed with that mistake once; it took the API down with
+      // "no such column: folder".
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS provenance_folder ON track_provenance(folder);
+        CREATE INDEX IF NOT EXISTS provenance_album_id ON track_provenance(album_id);
+        CREATE INDEX IF NOT EXISTS provenance_track_id ON track_provenance(track_id);
+      `);
+      // Backfill the derived ids for rows written before they existed, so an
+      // upgrade does not need a full rescan to make album pages work.
+      const stale = this.db.prepare('SELECT path FROM track_provenance WHERE album_id IS NULL').all() as { path: string }[];
+      if (stale.length) {
+        const fill = this.db.prepare('UPDATE track_provenance SET folder = ?, album_id = ?, track_id = ? WHERE path = ?');
+        this.db.exec('BEGIN IMMEDIATE');
+        try {
+          for (const row of stale) {
+            fill.run(albumFolderOf(row.path), libAlbumId(row.path), libTrackId(row.path), row.path);
+          }
+          this.db.exec('COMMIT');
+        } catch {
+          this.db.exec('ROLLBACK');
+        }
       }
     }
     return this.db;
@@ -319,8 +354,8 @@ export class ProvenanceStore {
       INSERT INTO track_provenance
         (path, match_key, artist, title, album, source, detail,
          codec, bitrate, sample_rate, bit_depth, size_bytes, mtime, scanned_at,
-         duration_ms, track_number, disc_number)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         duration_ms, track_number, disc_number, folder, album_id, track_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(path) DO UPDATE SET
         match_key = excluded.match_key, artist = excluded.artist, title = excluded.title,
         album = excluded.album, source = excluded.source, detail = excluded.detail,
@@ -328,7 +363,8 @@ export class ProvenanceStore {
         sample_rate = excluded.sample_rate, bit_depth = excluded.bit_depth,
         size_bytes = excluded.size_bytes, mtime = excluded.mtime,
         scanned_at = excluded.scanned_at, duration_ms = excluded.duration_ms,
-        track_number = excluded.track_number, disc_number = excluded.disc_number
+        track_number = excluded.track_number, disc_number = excluded.disc_number,
+        folder = excluded.folder, album_id = excluded.album_id, track_id = excluded.track_id
     `);
     let written = 0;
     db.exec('BEGIN IMMEDIATE');
@@ -356,6 +392,9 @@ export class ProvenanceStore {
           row.duration_ms == null ? null : Math.round(Number(row.duration_ms)),
           row.track_number == null ? null : Math.round(Number(row.track_number)),
           row.disc_number == null ? null : Math.round(Number(row.disc_number)),
+          albumFolderOf(file),
+          libAlbumId(file),
+          libTrackId(file),
         );
         written += 1;
       }
@@ -501,9 +540,12 @@ export class ProvenanceStore {
    */
   albums(): { id: string; name: string; artists: string; total_tracks: number; added_at: string; source: Source; rel: string }[] {
     const folders = new Map<string, ProvenanceRow[]>();
-    for (const row of this.handle().prepare('SELECT * FROM track_provenance').all() as ProvenanceRow[]) {
-      const folder = albumFolderOf(row.path);
-      if (!folder) continue;
+    // One pass, grouped on the stored folder. Only the columns the listing
+    // needs, so a thousand albums do not drag every column of 9,000 rows.
+    for (const row of this.handle().prepare(
+      'SELECT path, folder, album, artist, source, mtime FROM track_provenance WHERE folder IS NOT NULL',
+    ).all() as ProvenanceRow[]) {
+      const folder = row.folder!;
       (folders.get(folder) ?? folders.set(folder, []).get(folder)!).push(row);
     }
     // Undefined for an empty list rather than throwing: a folder of untagged
@@ -534,8 +576,9 @@ export class ProvenanceStore {
 
   /** The tracks of one library album, in disc/track order. */
   albumTracks(id: string): ProvenanceRow[] {
-    return (this.handle().prepare('SELECT * FROM track_provenance').all() as ProvenanceRow[])
-      .filter((row) => libAlbumId(row.path) === id)
+    return (this.handle().prepare(
+      'SELECT * FROM track_provenance WHERE album_id = ?',
+    ).all(id) as ProvenanceRow[])
       .sort((a, b) => (a.disc_number ?? 1) - (b.disc_number ?? 1)
         || (a.track_number ?? 0) - (b.track_number ?? 0)
         || a.path.localeCompare(b.path));
@@ -544,8 +587,9 @@ export class ProvenanceStore {
   /** One scanned file by its derived id, for playback. */
   trackById(id: string): ProvenanceRow | null {
     if (!id.startsWith(LIB_TRACK_PREFIX)) return null;
-    const rows = this.handle().prepare('SELECT * FROM track_provenance').all() as ProvenanceRow[];
-    return rows.find((row) => libTrackId(row.path) === id) ?? null;
+    return (this.handle().prepare(
+      'SELECT * FROM track_provenance WHERE track_id = ?',
+    ).get(id) as ProvenanceRow | undefined) ?? null;
   }
 
   /** Paths already scanned, with mtime+size, so the scanner can skip them. */

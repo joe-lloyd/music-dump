@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
-  ProvenanceStore, albumMatchKey, provenanceKey, qualityLabel, qualityTier, type ScanInput,
+  ProvenanceStore, albumMatchKey, libAlbumId, libTrackId, provenanceKey, qualityLabel,
+  qualityTier, type ScanInput,
 } from './provenance.ts';
 
 const withStore = (fn: (store: ProvenanceStore) => void): void => {
@@ -140,6 +141,56 @@ test('rescanning invalidates the album cache as well as the track cache', () => 
     // Same default TTL, so a stale cache would still answer "high" here.
     store.upsert([row({ path: '/lib/a.mp3' })]);
     assert.equal(store.albumBadges().get(albumMatchKey('Slayer', 'Seasons in the Abyss'))?.tier, 'lossless');
+  });
+});
+
+test('an album is the folder, so feature credits do not split a record', () => {
+  withStore((store) => {
+    // Real shape of the bug: one release, two different tagged artists.
+    store.upsert([
+      row({ path: '/lib/Serj/Covers/01.flac', artist: 'Serj Tankian', album: 'Covers' }),
+      row({ path: '/lib/Serj/Covers/02.flac', artist: 'Serj Tankian feat. Bic Runga', album: 'Covers' }),
+      row({ path: '/lib/Serj/Covers/03.flac', artist: 'Serj Tankian', album: 'Covers' }),
+    ]);
+    const albums = store.albums();
+    assert.equal(albums.length, 1, 'one folder is one album');
+    assert.equal(albums[0].total_tracks, 3);
+    // The credit most tracks carry, not whoever happens to be first.
+    assert.equal(albums[0].artists, 'Serj Tankian');
+  });
+});
+
+test('album and track lookups are indexed, not full scans', () => {
+  withStore((store) => {
+    store.upsert([
+      row({ path: '/lib/A/One/01.flac', album: 'One', title: 'a' }),
+      row({ path: '/lib/A/One/02.flac', album: 'One', title: 'b' }),
+      row({ path: '/lib/A/Two/01.flac', album: 'Two', title: 'c' }),
+    ]);
+    const id = libAlbumId('/lib/A/One/01.flac');
+    assert.equal(store.albumTracks(id).length, 2);
+    assert.equal(store.albumTracks(libAlbumId('/lib/A/Two/01.flac')).length, 1);
+    assert.equal(store.trackById(libTrackId('/lib/A/Two/01.flac'))?.title, 'c');
+    assert.equal(store.trackById('libtrack-nothing'), null);
+
+    // The ids must be stored, not recomputed per request: an album page and
+    // its cover both hit this, and a full scan per call took the server down.
+    const plan = store.db.prepare(
+      'EXPLAIN QUERY PLAN SELECT * FROM track_provenance WHERE album_id = ?',
+    ).all(id) as { detail: string }[];
+    assert.match(plan.map((step) => step.detail).join(' '), /USING INDEX/);
+  });
+});
+
+test('track order follows disc then track number, not filename luck', () => {
+  withStore((store) => {
+    store.upsert([
+      row({ path: '/lib/A/B/z.flac', album: 'B', title: 'second', track_number: 2, disc_number: 1 }),
+      row({ path: '/lib/A/B/a.flac', album: 'B', title: 'first', track_number: 1, disc_number: 1 }),
+      row({ path: '/lib/A/B/m.flac', album: 'B', title: 'disc two', track_number: 1, disc_number: 2 }),
+    ]);
+    const tracks = store.albumTracks(libAlbumId('/lib/A/B/a.flac'));
+    assert.deepEqual(tracks.map((t) => t.title), ['first', 'second', 'disc two']);
   });
 });
 

@@ -791,7 +791,9 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
           name: first.album,
           album_type: 'library',
           release_date: new Date(newest * 1000).toISOString().slice(0, 10),
-          image_url: `/img/folder?rel=${encodeURIComponent(relOf(first.path))}`,
+          // The folder, not the track file: /img/folder does resolve a file
+          // rel, but naming the directory is what it actually means.
+          image_url: `/img/folder?rel=${encodeURIComponent(path.dirname(relOf(first.path)))}`,
           total_tracks: tracks.length,
           is_saved: 0,
           downloaded: 1,
@@ -1732,6 +1734,42 @@ const server = http.createServer(async (req, res) => {
     // at ingesting folder art over the NFS mount, so the file comes first.
     const localImage = url.pathname.match(/^\/img\/local\/([A-Za-z0-9-]+)\.jpg$/);
     if (localImage) {
+      // A library album's art is the cover in its folder. Answered here rather
+      // than left to the <img> onerror fallback, so the first request already
+      // resolves and every surface behaves the same.
+      if (localImage[1].startsWith(LIB_ALBUM_PREFIX)) {
+        const tracks = provenance.albumTracks(localImage[1]);
+        const folder = tracks.length ? path.dirname(relOf(tracks[0].path)) : null;
+        if (folder) {
+          for (const name of ['cover.jpg', 'folder.jpg', 'cover.png', 'folder.png']) {
+            try {
+              const body = readFileSync(path.join(APP_LIBRARY_PREFIX, folder, name));
+              res.writeHead(200, {
+                'content-type': name.endsWith('.png') ? 'image/png' : 'image/jpeg',
+                'cache-control': 'public, max-age=86400',
+              });
+              res.end(body);
+              return;
+            } catch { /* try the next filename */ }
+          }
+          // A folder of loose singles has no shared cover; each track carries
+          // its own sidecar, so the first track's stands for the set.
+          const first = relOf(tracks[0].path);
+          for (const sidecar of [`${first.replace(/\.[^.]+$/, '')}.jpg`, `${first.replace(/\.[^.]+$/, '')}.png`]) {
+            try {
+              const body = readFileSync(path.join(APP_LIBRARY_PREFIX, sidecar));
+              res.writeHead(200, {
+                'content-type': sidecar.endsWith('.png') ? 'image/png' : 'image/jpeg',
+                'cache-control': 'public, max-age=86400',
+              });
+              res.end(body);
+              return;
+            } catch { /* fall through to the placeholder */ }
+          }
+        }
+        res.writeHead(404).end();
+        return;
+      }
       const track = upgrades.localTracks().find((row) => row.album_id === localImage[1]);
       if (track) {
         // The worker records its own mount path; this container sees the
