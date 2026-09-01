@@ -962,6 +962,8 @@ const views = {
     ].filter(Boolean).join(' · ');
     const discs = [...new Set(d.tracks.map((t) => t.disc_number ?? 1))].sort();
     const list = discs.map((disc) => {
+      // Badges per TRACK, not per album: a Soulseek folder can mix a 24-bit
+      // rip with a transcode, and this is the page where that shows.
       const rows = d.tracks.filter((t) => (t.disc_number ?? 1) === disc).map((t) => `
         <div class="row">
           <span class="rank">${t.track_number ?? ''}</span>
@@ -969,6 +971,7 @@ const views = {
           <span class="heart">${t.liked ? '♥' : ''}</span>
           <div class="mid"><div>${esc(t.name)}</div>
             <div class="sub">${esc(t.artists ?? '')}</div></div>
+          ${mediaBadges(t)}
           <div class="end">${dur(t.duration_ms)}</div>
           ${upgradeControl(t)}
           ${spotify('track', t.id)}

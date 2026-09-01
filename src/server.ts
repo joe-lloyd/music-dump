@@ -190,19 +190,66 @@ function latestDownloads(limit = 60): Record<string, unknown>[] {
   rows.sort((a, b) => String(b.added_at).localeCompare(String(a.added_at)));
 
   // Lidarr folders are named "Album (Year) [Type]" and carry no Spotify id,
-  // so match the stripped name back to the taste DB purely to borrow its
-  // artwork. A miss just means the placeholder letter.
+  // so match the stripped name back to the taste DB for the id and artwork.
+  //
+  // The match must NOT require artwork: it used to, which silently coupled
+  // two unrelated things - an album the taste DB knew but had no image for
+  // lost its link to the album page as well as its cover. The link matters
+  // on its own; a miss on the image just means the placeholder letter.
+  //
+  // Artist+name is tried first, bare name second: name-only matching both
+  // collides across artists (two records called "Greatest Hits") and is the
+  // only thing that works when the folder credits differ from Spotify's
+  // ("Igorrr and Ruby My Dear" vs "Igorrr").
   const bare = (value: string) => value.replace(/\s*[(\[].*$/, '').trim().toLowerCase();
-  const art = new Map<string, { id: string; image_url: string | null }>();
+  type ArtHit = { id: string; image_url: string | null; nameKey: string };
+  const byArtistAndName = new Map<string, ArtHit>();
+  const byName = new Map<string, ArtHit>();
+  const byArtist = new Map<string, ArtHit[]>();
+  const keep = (map: Map<string, ArtHit>, key: string, hit: ArtHit) => {
+    const seen = map.get(key);
+    // Several editions can share a key; prefer one that brings artwork.
+    if (!seen || (!seen.image_url && hit.image_url)) map.set(key, hit);
+  };
+  const artistKeyOf = (value: string) => albumMatchKey(value, 'x').replace(/\|x$/, '');
   for (const row of query(
-    'SELECT id, name, image_url FROM albums WHERE image_url IS NOT NULL',
-  ) as { id: string; name: string; image_url: string }[]) {
-    const key = bare(row.name);
-    if (key && !art.has(key)) art.set(key, { id: row.id, image_url: row.image_url });
+    `SELECT al.id, al.name, al.image_url,
+       (SELECT a.name FROM album_artists aa JOIN artists a ON a.id = aa.artist_id
+         WHERE aa.album_id = al.id ORDER BY aa.position LIMIT 1) AS artist
+     FROM albums al`,
+  ) as { id: string; name: string; image_url: string | null; artist: string | null }[]) {
+    const nameKey = bare(row.name);
+    if (!nameKey) continue;
+    const hit = { id: row.id, image_url: row.image_url, nameKey };
+    const bothKey = albumMatchKey(row.artist ?? '', row.name);
+    if (bothKey) keep(byArtistAndName, bothKey, hit);
+    keep(byName, nameKey, hit);
+    const artistKey = artistKeyOf(row.artist ?? '');
+    if (artistKey) {
+      const list = byArtist.get(artistKey) ?? [];
+      list.push(hit);
+      byArtist.set(artistKey, list);
+    }
   }
+  // Third tier: same artist, one title a prefix of the other. This is what
+  // links "The Fat of the Land 25th Anniversary – Remastered" to "The Fat of
+  // the Land" — the suffix is unbracketed, so the bare/stripped keys never
+  // meet. Scoped to a single artist's shelf and a minimum length so "Live"
+  // cannot swallow "Live at Wembley" across the whole catalogue.
+  const prefixMatch = (artist: string, name: string): ArtHit | undefined => {
+    const nameKey = bare(name);
+    if (nameKey.length < 6) return undefined;
+    const candidates = (byArtist.get(artistKeyOf(artist)) ?? []).filter((hit) =>
+      hit.nameKey.length >= 6
+      && (nameKey.startsWith(hit.nameKey) || hit.nameKey.startsWith(nameKey)));
+    // The longest shared title is the closest edition.
+    return candidates.sort((a, b) => b.nameKey.length - a.nameKey.length)[0];
+  };
   for (const row of rows) {
     if (row.album_id) continue;
-    const found = art.get(bare(String(row.name)));
+    const found = byArtistAndName.get(albumMatchKey(String(row.artists), String(row.name)))
+      ?? byName.get(bare(String(row.name)))
+      ?? prefixMatch(String(row.artists), String(row.name));
     if (found) {
       row.album_id = found.id;
       row.image_url = found.image_url;
