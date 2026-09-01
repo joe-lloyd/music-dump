@@ -6,3 +6,6 @@ data/
 # scratch output from ad-hoc verification sweeps
 allids.txt
 ids*.txt
+
+# one-shot patch scripts used while editing; never part of the app
+patch_*.py
