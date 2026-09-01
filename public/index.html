@@ -843,7 +843,14 @@ const views = {
     // a finished-looking card fail with an error on play. null means the
     // index is unavailable (eliot asleep), which is unknown - not broken.
     const pending = rows.filter((r) => r.playable === false).length;
-    return `<p class="note">Newest arrivals in the local library, by when the files landed.${
+    // The server returns the last 24 hours or the newest 50, whichever is
+    // more; say which of the two you are actually looking at.
+    const dayAgo = Date.now() - 864e5;
+    const today = rows.filter((r) => Date.parse(r.added_at) >= dayAgo).length;
+    const scope = today >= rows.length
+      ? `All ${rows.length} arrivals from the last 24 hours.`
+      : `${today} in the last 24 hours, plus enough older ones to make ${rows.length}.`;
+    return `<p class="note">${scope} Ordered by when the files landed.${
         pending ? ` ${pending} still syncing into the player — they go live within a few minutes.` : ''}</p>
       <div class="al-grid">${rows.map((row) => albumCell(
         row,

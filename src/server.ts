@@ -157,11 +157,36 @@ function mtime(at: string): number {
   }
 }
 
+/**
+ * When an album's *music* landed, from the newest audio file inside it.
+ *
+ * Not the directory's mtime, which is what this used to read. A directory is
+ * touched by anything written into it, so the artwork backfill writing
+ * cover.jpg into 700 folders made the entire library look like it had arrived
+ * in the past hour. Any sidecar — .nfo, .lrc, a re-downloaded cover — would do
+ * the same. Only the audio answers the question being asked.
+ *
+ * Falls back to the directory for multi-disc releases, where the audio sits in
+ * CD 01/ subfolders and the top level legitimately holds none.
+ */
+function albumLanded(dir: string): number {
+  let newest = 0;
+  try {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isFile() || !AUDIO_EXT.has(path.extname(entry.name).toLowerCase())) continue;
+      newest = Math.max(newest, mtime(path.join(dir, entry.name)));
+    }
+  } catch { /* unreadable while eliot sleeps */ }
+  return newest || mtime(dir);
+}
+
 function latestDownloads(limit = 60): Record<string, unknown>[] {
   if (downloadCache && Date.now() - downloadCache.at < DOWNLOAD_TTL_MS) return downloadCache.rows.slice(0, limit);
   const rows: Record<string, unknown>[] = [];
-  const add = (name: string, artist: string, at: string, kind: string, albumId: string | null) => {
-    const when = mtime(at);
+  const add = (name: string, artist: string, at: string, kind: string, albumId: string | null, isDir = true) => {
+    // A single is one file, so stat it directly; an album dates from the
+    // newest track inside it, never from the folder's own mtime.
+    const when = isDir ? albumLanded(at) : mtime(at);
     if (!when) return;
     // Library-relative path, kept so /api/latest can ask Jellyfin's index
     // whether this is actually servable yet rather than merely on disk.
@@ -185,7 +210,7 @@ function latestDownloads(limit = 60): Record<string, unknown>[] {
           files = readdirSync(artistPath).filter((f) => AUDIO_EXT.has(path.extname(f).toLowerCase()));
         } catch { /* unreadable while eliot sleeps */ }
         for (const file of files) {
-          add(path.parse(file).name, artist, path.join(artistPath, file), 'single', null);
+          add(path.parse(file).name, artist, path.join(artistPath, file), 'single', null, false);
         }
       }
     } else {
@@ -1082,8 +1107,17 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
   },
 
   // Newest finished downloads, by what is actually on disk.
+  // "The last 24 hours, or the newest 50, whichever is more." A quiet day
+  // still fills the page, and a heavy one is never truncated at an arbitrary
+  // count — on a day the Soulseek sweep and Lidarr both run, 24 hours can be
+  // a hundred albums and cutting it at 50 would hide the newest half of them.
   '/api/latest': (params) => {
-    const rows = latestDownloads(Math.min(Number(params.get('limit') ?? 60), 200));
+    const hours = Math.min(Math.max(Number(params.get('hours') ?? 24), 1), 24 * 30);
+    const floor = Math.min(Math.max(Number(params.get('min') ?? 50), 1), 500);
+    const all = latestDownloads(1000);
+    const since = Date.now() - hours * 3_600_000;
+    const recent = all.filter((row) => Date.parse(String(row.added_at)) >= since).length;
+    const rows = all.slice(0, Math.min(Math.max(recent, floor), all.length));
     // Checked fresh on every request: a card flips from "syncing" to playable
     // the moment Jellyfin's scan lands, without waiting out the disk cache.
     const indexed = jellyfin.indexedRelPaths();
