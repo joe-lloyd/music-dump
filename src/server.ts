@@ -983,11 +983,15 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
       if (!tracks.length) return { album: null, artists: [], tracks: [] };
       const first = tracks[0];
       const newest = Math.max(...tracks.map((track) => Number(track.mtime ?? 0)));
+      const singlesFolder = relOf(first.path).startsWith('_Singles/');
       return {
         album: {
           id,
-          name: first.album,
-          album_type: 'library',
+          // A singles folder's page is the collection, and its heading must
+          // agree with the card that led here - not borrow one track's
+          // release name.
+          name: singlesFolder ? 'Singles' : first.album,
+          album_type: singlesFolder ? 'singles collection' : 'library',
           release_date: new Date(newest * 1000).toISOString().slice(0, 10),
           // The folder, not the track file: /img/folder does resolve a file
           // rel, but naming the directory is what it actually means.
@@ -1103,17 +1107,26 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
   // Every album on disk, whether or not Spotify has ever heard of it. This is
   // the catalogue the UI navigates; binding it to Spotify left most of the
   // library unreachable.
-  '/api/library-albums': () => provenance.albums().map((album) => ({
-    id: album.id,
-    name: album.name,
-    artists: album.artists,
-    total_tracks: album.total_tracks,
-    added_at: album.added_at,
-    image_url: `/img/folder?rel=${encodeURIComponent(relOf(album.rel))}`,
-    downloaded: 1,
-    local: 1,
-    source: album.source,
-  })),
+  '/api/library-albums': () => provenance.albums().map((album) => {
+    // A _Singles folder is a COLLECTION, not a record: its tracks each name
+    // their own release, and the old modal-tag naming dressed the card up as
+    // an album you own ("Fated" by Nosaj Thing, when you own one single from
+    // it). Say what it is - the same music reads the same here as it does on
+    // Latest, just gathered.
+    const isSingles = relOf(album.rel).startsWith('_Singles/');
+    return {
+      id: album.id,
+      name: isSingles ? 'Singles' : album.name,
+      artists: album.artists,
+      album_group: isSingles ? 'singles collection' : null,
+      total_tracks: album.total_tracks,
+      added_at: album.added_at,
+      image_url: `/img/folder?rel=${encodeURIComponent(relOf(album.rel))}`,
+      downloaded: 1,
+      local: 1,
+      source: album.source,
+    };
+  }),
 
   /**
    * New and upcoming records from the artists we actually follow.
@@ -2372,6 +2385,27 @@ const server = http.createServer(async (req, res) => {
         res.end(readFileSync(found.file));
         return;
       }
+      // Last resort: the newest sidecar in the folder. A singles folder has
+      // no cover.jpg on purpose - each single wears its own art - so a card
+      // that stands for the whole folder (the Albums grid, an album hero)
+      // borrows the freshest sleeve rather than showing nothing. Asked for by
+      // one single whose OWN art is missing, a sibling's sleeve is still a
+      // better answer than a blank: 10 of 62 collections keyed on exactly
+      // such a file. Ordinary album folders almost always have cover.jpg and
+      // never reach this.
+      const sidecarDir = isFile ? path.dirname(dir) : dir;
+      try {
+        const newest = readdirSync(sidecarDir)
+          .filter((file) => file.toLowerCase().endsWith('.jpg') && !file.startsWith('.'))
+          .map((file) => path.join(sidecarDir, file))
+          .map((file) => ({ file, at: mtime(file) ?? 0 }))
+          .sort((a, b) => b.at - a.at)[0];
+        if (newest) {
+          res.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'public, max-age=86400' });
+          res.end(readFileSync(newest.file));
+          return;
+        }
+      } catch { /* unreadable while eliot sleeps */ }
       // 404 rather than a placeholder: the UI already draws its own initial.
       res.writeHead(404).end();
       return;
@@ -2397,20 +2431,24 @@ const server = http.createServer(async (req, res) => {
             res.end(readFileSync(found.file));
             return;
           }
-          // A folder of loose singles has no shared cover; each track carries
-          // its own sidecar, so the first track's stands for the set.
-          const first = relOf(tracks[0].path);
-          for (const sidecar of [`${first.replace(/\.[^.]+$/, '')}.jpg`, `${first.replace(/\.[^.]+$/, '')}.png`]) {
-            try {
-              const body = readFileSync(path.join(APP_LIBRARY_PREFIX, sidecar));
-              res.writeHead(200, {
-                'content-type': sidecar.endsWith('.png') ? 'image/png' : 'image/jpeg',
-                'cache-control': 'public, max-age=86400',
-              });
-              res.end(body);
+          // A folder of loose singles has no shared cover; each track wears
+          // its own sidecar. The newest one stands for the set - NOT only the
+          // first track's, which was the same trap the Albums grid fell into:
+          // key on the one single whose art is missing and the whole
+          // collection goes blank while its siblings hold sleeves.
+          try {
+            const dirAbs = path.join(APP_LIBRARY_PREFIX, folder);
+            const newest = readdirSync(dirAbs)
+              .filter((file) => file.toLowerCase().endsWith('.jpg') && !file.startsWith('.'))
+              .map((file) => path.join(dirAbs, file))
+              .map((file) => ({ file, at: mtime(file) }))
+              .sort((a, b) => b.at - a.at)[0];
+            if (newest) {
+              res.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'public, max-age=86400' });
+              res.end(readFileSync(newest.file));
               return;
-            } catch { /* fall through to the placeholder */ }
-          }
+            }
+          } catch { /* unreadable while eliot sleeps */ }
         }
         res.writeHead(404).end();
         return;
