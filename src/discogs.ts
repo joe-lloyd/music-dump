@@ -96,19 +96,65 @@ export function toShelfItem(release: CollectionRelease): Omit<ShelfItem, 'status
   };
 }
 
+/**
+ * Discogs has two credential shapes and they are NOT interchangeable.
+ *
+ *  - A **consumer key + secret** identifies an *application*. It authenticates
+ *    requests to public endpoints (catalogue search, release lookup) at the
+ *    full rate limit, and that is all. It cannot read anyone's collection,
+ *    because it does not identify a person.
+ *  - A **personal access token** identifies *you*. It is what unlocks
+ *    /oauth/identity and the collection endpoints.
+ *
+ * The alternative to a personal token is the full OAuth 1.0a dance
+ * (request token -> browser authorize -> verifier -> access token), which for
+ * a single-user homelab app buys nothing over the token you can generate with
+ * one click on the same settings page.
+ *
+ * Both are supported here: whichever is configured is used, with the personal
+ * token preferred when both are present.
+ */
+export type DiscogsScope = 'none' | 'catalogue' | 'account';
+
 export class DiscogsClient {
   private readonly token: string;
+  private readonly key: string;
+  private readonly secret: string;
 
-  constructor(token = process.env.DISCOGS_TOKEN ?? '') {
-    this.token = token;
+  constructor(
+    token = process.env.DISCOGS_TOKEN ?? '',
+    key = process.env.DISCOGS_CONSUMER_KEY ?? '',
+    secret = process.env.DISCOGS_CONSUMER_SECRET ?? '',
+  ) {
+    this.token = token.trim();
+    this.key = key.trim();
+    this.secret = secret.trim();
+  }
+
+  /** What the configured credentials can actually reach. */
+  get scope(): DiscogsScope {
+    if (this.token) return 'account';
+    if (this.key && this.secret) return 'catalogue';
+    return 'none';
   }
 
   get configured(): boolean {
-    return this.token.trim().length > 0;
+    return this.scope !== 'none';
+  }
+
+  /** Collection sync needs a personal token; search does not. */
+  get canReadCollection(): boolean {
+    return this.scope === 'account';
+  }
+
+  private authorization(): string {
+    return this.token
+      ? `Discogs token=${this.token}`
+      : `Discogs key=${this.key}, secret=${this.secret}`;
   }
 
   private async request<T>(pathname: string, params: Record<string, string> = {}): Promise<T> {
-    if (!this.configured) throw new DiscogsError('DISCOGS_TOKEN is not set', 503);
+    if (!this.configured) throw new DiscogsError('No Discogs credentials are configured', 503);
     const url = new URL(API + pathname);
     for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
 
@@ -117,7 +163,7 @@ export class DiscogsClient {
     // than failing a sync the user asked for.
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const res = await fetch(url, {
-        headers: { authorization: `Discogs token=${this.token}`, 'user-agent': AGENT },
+        headers: { authorization: this.authorization(), 'user-agent': AGENT },
         signal: AbortSignal.timeout(20_000),
       });
       if (res.status === 429 && attempt === 0) {
@@ -126,7 +172,13 @@ export class DiscogsClient {
         continue;
       }
       if (!res.ok) {
-        const detail = res.status === 401 ? 'Discogs rejected the token' : `Discogs returned ${res.status}`;
+        // 401 on a consumer key/secret is not a bad credential, it is the
+        // wrong *kind* of credential; say which so it is actionable.
+        const detail = res.status !== 401
+          ? `Discogs returned ${res.status}`
+          : this.canReadCollection
+            ? 'Discogs rejected the personal access token'
+            : 'This endpoint needs a personal access token, not a consumer key and secret';
         throw new DiscogsError(detail, res.status);
       }
       return await res.json() as T;
@@ -136,6 +188,14 @@ export class DiscogsClient {
 
   /** The token's own account - saves asking for a username separately. */
   identity(): Promise<{ username: string; id: number }> {
+    if (!this.canReadCollection) {
+      throw new DiscogsError(
+        'Collection sync needs a personal access token. Generate one at '
+        + 'discogs.com/settings/developers and set DISCOGS_TOKEN; a consumer '
+        + 'key and secret can only search the catalogue.',
+        403,
+      );
+    }
     return this.request('/oauth/identity');
   }
 

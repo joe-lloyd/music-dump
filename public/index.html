@@ -845,15 +845,24 @@ const views = {
   // is about which of those discs still needs ripping.
   async cds() {
     const d = await api('/api/cds');
-    if (!d.configured && !d.items.length) {
+    if (!d.canSync && !d.items.length) {
+      // A consumer key and secret authenticate an *application* and can only
+      // reach public endpoints. Reading a collection identifies a person, so
+      // it needs a personal token - different credential, same settings page.
+      const half = d.scope === 'catalogue';
       return `<div class="empty cd-setup">
-        <p><b>Discogs is not connected yet.</b></p>
-        <p>Generate a personal access token at
-          <a href="https://www.discogs.com/settings/developers" target="_blank" rel="noreferrer">discogs.com/settings/developers</a>
-          &rarr; <i>Generate new token</i>, then add it to the Pi's
-          <code>.env</code> as <code>DISCOGS_TOKEN</code> and restart the web container.</p>
-        <p>Once it is set, this page syncs your Discogs collection and tracks which
-          discs are still waiting to be ripped.</p>
+        <p><b>${half
+          ? 'Discogs can search, but not read your collection yet.'
+          : 'Discogs is not connected yet.'}</b></p>
+        ${half ? `<p>The consumer key and secret are set, and those authenticate the
+          <i>app</i> against the public catalogue. Reading <i>your</i> collection
+          identifies <i>you</i>, which needs a personal access token instead.</p>` : ''}
+        <p>On <a href="https://www.discogs.com/settings/developers" target="_blank" rel="noreferrer">discogs.com/settings/developers</a>,
+          scroll past the OAuth app box to <b>Generate new token</b> &mdash; that
+          gives a single long string. Add it to the Pi's <code>.env</code> as
+          <code>DISCOGS_TOKEN</code> and restart the web container.</p>
+        <p>Then this page syncs your collection and tracks which discs are still
+          waiting to be ripped.</p>
       </div>`;
     }
     const tiles = [
@@ -866,7 +875,7 @@ const views = {
     return `
       <div class="tiles">${tiles}</div>
       <div class="tools cd-tools">
-        <button class="primary-action" id="cd-sync" type="button">Sync from Discogs</button>
+        <button class="primary-action" id="cd-sync" type="button"${d.canSync ? '' : ' disabled title="needs a personal access token"'}>Sync from Discogs</button>
         <span class="sub" id="cd-synced">${synced}</span>
         <span class="cd-filters" id="cd-filters">
           ${[['shelf', 'To rip'], ['ripping', 'Ripping'], ['ripped', 'Ripped'], ['skip', 'Skipped'], ['all', 'All']]

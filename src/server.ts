@@ -1024,6 +1024,10 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
     const items = shelf.list();
     return {
       configured: discogs.configured,
+      // 'catalogue' can search but not read a collection; the UI has to say
+      // which, because the fix is different for each.
+      scope: discogs.scope,
+      canSync: discogs.canReadCollection,
       sync: shelf.lastSync(),
       reconciled,
       counts: {

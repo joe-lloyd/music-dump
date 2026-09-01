@@ -67,10 +67,15 @@ services:
       # The library scanner posts audio-quality and provenance rows with the
       # same token — same trusted worker, same trust boundary.
       UPGRADE_WORKER_TOKEN: "${UPGRADE_WORKER_TOKEN:-}"
-      # Personal access token from discogs.com/settings/developers. Read-only
-      # use: the CDs tab syncs the collection and searches the catalogue.
-      # Absent just means the tab reports itself unconfigured.
+      # Discogs, read-only, for the CDs tab. Two different credentials:
+      #   DISCOGS_TOKEN            personal access token - identifies YOU, and
+      #                            is the only thing that can read a collection
+      #   DISCOGS_CONSUMER_KEY/    OAuth app credentials - identify the APP and
+      #   DISCOGS_CONSUMER_SECRET  authenticate catalogue search only
+      # Absent just means the tab reports what it is missing.
       DISCOGS_TOKEN: "${DISCOGS_TOKEN:-}"
+      DISCOGS_CONSUMER_KEY: "${DISCOGS_CONSUMER_KEY:-}"
+      DISCOGS_CONSUMER_SECRET: "${DISCOGS_CONSUMER_SECRET:-}"
     volumes:
       - .:/app
       # Read-only view of the music library so locally imported albums can
