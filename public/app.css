@@ -301,6 +301,52 @@ input:focus-visible {
   border-bottom: 1px solid var(--line);
 }
 
+/* Step back one page. The app is normally opened inside the phone's WebView,
+   which has no browser chrome at all, so without this the system back gesture
+   is the only way out of artist -> artist -> album - and that leaves the whole
+   app rather than stepping back through it.
+
+   [hidden] needs saying explicitly: the display below would otherwise beat the
+   attribute and leave a back button on the overview, same trap as the drawer
+   backdrop further down. */
+.page-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  margin-bottom: 10px;
+  padding: 0 13px 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: none;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: border-color .16s, color .16s, background .16s;
+}
+
+.page-back[hidden] { display: none; }
+
+.page-back:hover {
+  border-color: var(--line-strong);
+  background: var(--card-hover);
+  color: var(--ink);
+}
+
+.page-back svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .page-kicker {
   display: block;
   margin-bottom: 8px;
@@ -2388,6 +2434,7 @@ input[type="range"] {
   .sidebar-foot { display: grid; }
   .content-shell { padding: 18px 16px 54px; }
   .page-kicker { display: none; }
+  .page-back { min-height: 36px; margin-bottom: 8px; padding: 0 15px 0 11px; }
   .page-head { align-items: center; min-height: 0; margin-bottom: 12px; padding-bottom: 10px; }
   .page-head h1 { font-size: 20px; }
   .overview-hero { grid-template-columns: 1fr; min-height: 0; padding: 28px; }

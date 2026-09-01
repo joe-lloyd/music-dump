@@ -150,6 +150,11 @@
   <section class="content-shell">
     <header class="page-head">
       <div>
+        <!-- Sub pages only; the router shows and hides it. -->
+        <button class="page-back" id="page-back" type="button" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg>
+          <span>Back</span>
+        </button>
         <span class="page-kicker" id="page-kicker">Your listening memory</span>
         <h1 id="page-title">The collection</h1>
       </div>
@@ -1946,6 +1951,47 @@ document.addEventListener('click', async (event) => {
 // cached views paint before the timer fires and never flash it.
 const SKELETON = `<div class="skeleton">${'<div class="skeleton-row"><span></span><span></span></div>'.repeat(9)}</div>`;
 
+/* --- Back, without leaving the app ---------------------------------------
+   Sub pages nest - artists -> artist -> album - but the app is normally opened
+   inside the phone's WebView, which has no browser chrome. There the system
+   back gesture closes the whole thing and returns to the host app instead of
+   stepping back a page, so sub pages carry their own control.
+
+   history.back() is only safe once this document has put an entry behind us;
+   on a cold deep link it would step back out to whatever launched us. So every
+   history entry is stamped with how deep it is. A brand new entry arrives with
+   no state and counts one deeper; returning to one we already stamped restores
+   its number, which is what tells a back navigation from a new one. At depth 0
+   there is nothing of ours behind us, so the button goes to the list the page
+   belongs to rather than out of the app. */
+const PARENT_OF = { artist: 'artists', album: 'albums', playlist: 'playlists', station: 'radio' };
+const backButton = $('#page-back');
+let navDepth = 0;
+
+if (typeof history.state?.depth === 'number') navDepth = history.state.depth;
+else history.replaceState({ ...history.state, depth: 0 }, '');
+
+addEventListener('hashchange', () => {
+  const stamped = history.state?.depth;
+  if (typeof stamped === 'number') navDepth = stamped;
+  else history.replaceState({ ...history.state, depth: ++navDepth }, '');
+});
+
+// Called by the router on every render. `kind` is the sort of sub page, or
+// null for one of the tabs, which are destinations rather than steps.
+function setBack(kind) {
+  const parent = kind ? PARENT_OF[kind] : null;
+  backButton.hidden = !parent;
+  if (!parent) return;
+  backButton.dataset.parent = parent;
+  backButton.setAttribute('aria-label', navDepth > 0 ? 'Back' : `Back to ${TABS[parent]}`);
+}
+
+backButton.addEventListener('click', () => {
+  if (navDepth > 0) history.back();
+  else location.hash = backButton.dataset.parent || 'overview';
+});
+
 let showGen = 0;
 async function show() {
   const gen = ++showGen;
@@ -1966,6 +2012,7 @@ async function show() {
     : detail ? DETAIL_COPY[detail[1]] : PAGE_COPY[tab];
   $('#page-kicker').textContent = copy[0];
   $('#page-title').textContent = copy[1];
+  setBack(station ? 'station' : detail ? detail[1] : null);
   const main = $('#main');
   const skeletonTimer = setTimeout(() => { if (gen === showGen) { main.innerHTML = SKELETON; scrollTo(0, 0); } }, 90);
   try {

@@ -41,6 +41,20 @@ test('every shipped javascript file parses', () => {
   }
 });
 
+// The `hidden` attribute is only display:none in the UA stylesheet, so ANY
+// author `display` on the element's own class beats it and the control is
+// permanently on screen. The drawer backdrop was caught by this once already
+// (see the comment on body.nav-open .nav-backdrop). The back button is the
+// same shape - display:inline-flex, shown and hidden by the router through
+// the attribute - so it needs its guard kept.
+test('the back button stays hidden when the router hides it', () => {
+  const css = readFileSync(path.join(PUBLIC, 'app.css'), 'utf8');
+  const html = readFileSync(path.join(PUBLIC, 'index.html'), 'utf8');
+  assert.match(html, /id="page-back"[^>]*\shidden/, 'the back button must ship hidden');
+  assert.match(css, /\.page-back\[hidden\]\s*\{[^}]*display:\s*none/,
+    '.page-back sets a display, so it needs an explicit [hidden] rule to beat it');
+});
+
 test('the manifest and any JSON assets are valid JSON', () => {
   for (const name of readdirSync(PUBLIC).filter((file) => file.endsWith('.webmanifest') || file.endsWith('.json'))) {
     const body = readFileSync(path.join(PUBLIC, name), 'utf8');
