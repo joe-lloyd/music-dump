@@ -33,6 +33,9 @@ export interface UpgradeJob {
   duration_ms: number | null;
   current_path: string | null;
   current_codec: string | null;
+  auto_upgrade: number;
+  recording_mbid: string | null;
+  release_mbid: string | null;
   phase: UpgradePhase;
   status: UpgradeStatus;
   source_attempts: number;
@@ -62,6 +65,15 @@ export interface CreateUpgrade {
   currentPath?: string | null;
   currentCodec?: string | null;
   maxAttempts?: number;
+  /**
+   * Hunt for a lossless copy once the file is here. Defaults to true, which is
+   * right for anything deliberately asked for. Radio's fetch-ahead sets it
+   * false: a station plays dozens of tracks nobody chose, and sending all of
+   * them to Soulseek turns passive listening into a download campaign.
+   */
+  autoUpgrade?: boolean;
+  recordingMbid?: string | null;
+  releaseMbid?: string | null;
 }
 
 export interface FinishUpgrade {
@@ -176,6 +188,9 @@ export class UpgradeStore {
           CHECK (downloader IN ('auto', 'yt-dlp', 'spotdl')),
         source_mode TEXT NOT NULL DEFAULT 'single'
           CHECK (source_mode IN ('single', 'playlist', 'chapters')),
+        auto_upgrade INTEGER NOT NULL DEFAULT 1,
+        recording_mbid TEXT,
+        release_mbid TEXT,
         parent_id INTEGER REFERENCES upgrade_queue(id),
         track_number INTEGER,
         batch_size INTEGER,
@@ -250,6 +265,22 @@ export class UpgradeStore {
     if (!columns.has('batch_size')) {
       this.db.exec('ALTER TABLE upgrade_queue ADD COLUMN batch_size INTEGER');
     }
+    // Whether a sourced file should then be hunted for in lossless. Default 1
+    // keeps every existing job behaving exactly as before; only radio's
+    // fetch-ahead opts out, because a track you were merely PLAYED is not a
+    // track you asked to own.
+    if (!columns.has('auto_upgrade')) {
+      this.db.exec('ALTER TABLE upgrade_queue ADD COLUMN auto_upgrade INTEGER NOT NULL DEFAULT 1');
+    }
+    // MusicBrainz identity, when the track came in through radio. The release
+    // id is a direct key into Cover Art Archive, which is how a YouTube-sourced
+    // single gets real album art instead of a video thumbnail.
+    if (!columns.has('recording_mbid')) {
+      this.db.exec('ALTER TABLE upgrade_queue ADD COLUMN recording_mbid TEXT');
+    }
+    if (!columns.has('release_mbid')) {
+      this.db.exec('ALTER TABLE upgrade_queue ADD COLUMN release_mbid TEXT');
+    }
     this.db.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_upgrade_parent_track
         ON upgrade_queue(parent_id, track_number)
@@ -287,8 +318,9 @@ export class UpgradeStore {
           track_id, source_url, downloader, source_mode, parent_id, track_number,
           artist, title, album, duration_ms,
           current_path, current_codec, phase, status, max_attempts,
+          auto_upgrade, recording_mbid, release_mbid,
           next_attempt_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         input.trackId?.trim() || null,
         input.sourceUrl?.trim() || null,
@@ -305,6 +337,9 @@ export class UpgradeStore {
         phase,
         status,
         maxAttempts,
+        input.autoUpgrade === false ? 0 : 1,
+        input.recordingMbid?.trim() || null,
+        input.releaseMbid?.trim() || null,
         alreadyLossless ? null : at,
         at,
         at,
@@ -399,6 +434,74 @@ export class UpgradeStore {
     });
   }
 
+  /** Attach a MusicBrainz identity to a job that predates the columns. */
+  attachMbids(id: number, recordingMbid: string | null, releaseMbid: string | null): void {
+    this.db.prepare(`
+      UPDATE upgrade_queue
+      SET recording_mbid = COALESCE(?, recording_mbid),
+          release_mbid = COALESCE(?, release_mbid),
+          updated_at = ?
+      WHERE id = ?
+    `).run(recordingMbid, releaseMbid, nowIso(this.now), id);
+  }
+
+  /** Radio-sourced singles that landed, for the artwork backfill. */
+  sourcedSingles(): UpgradeJob[] {
+    return (this.db.prepare(`
+      SELECT * FROM upgrade_queue
+      WHERE source_url LIKE 'ytsearch%' AND current_path IS NOT NULL
+      ORDER BY id
+    `).all() as unknown[]).map(asJob);
+  }
+
+  /**
+   * Promote a parked track into the lossless hunt.
+   *
+   * This is the "I actually want this one" signal. A radio fetch lands parked
+   * - file on disk, no Soulseek hunting - and stays that way until something
+   * says otherwise, which is what keeps a station from turning into a
+   * download campaign for music nobody chose.
+   *
+   * Idempotent, and honest about jobs that need nothing: one already queued,
+   * working or lossless is left exactly as it is.
+   */
+  promote(id: number): { job: UpgradeJob; changed: boolean } {
+    const job = this.get(id);
+    if (!job) throw new Error(`no such job: ${id}`);
+    this.db.prepare(
+      'UPDATE upgrade_queue SET auto_upgrade = 1, updated_at = ? WHERE id = ?',
+    ).run(nowIso(this.now), id);
+    // Still sourcing: flipping the flag is enough, finish() will route it into
+    // the queue instead of parking it when the download lands.
+    if (job.phase === 'source') return { job: this.get(id)!, changed: true };
+    if (job.status === 'cancelled' || job.status === 'exhausted') {
+      return { job: this.retry(id), changed: true };
+    }
+    return { job: this.get(id)!, changed: false };
+  }
+
+  /**
+   * A job for this artist+title that has not given up yet.
+   *
+   * Radio's fetch-ahead runs every time the queue advances, so without this
+   * the same unowned track would be re-queued on every tick — and the worker
+   * would download it once per duplicate.
+   */
+  findQueued(artist: string, title: string): UpgradeJob | null {
+    const row = this.db.prepare(`
+      SELECT * FROM upgrade_queue
+      WHERE artist = ? COLLATE NOCASE AND title = ? COLLATE NOCASE
+        AND status != 'exhausted'
+        -- A PARKED job is 'cancelled' but has its file: it must still block a
+        -- second fetch, or radio would re-download everything it parked in the
+        -- window before the library scanner notices the file. A job cancelled
+        -- with no file was abandoned by hand and may be asked for again.
+        AND (status != 'cancelled' OR current_path IS NOT NULL)
+      ORDER BY id DESC LIMIT 1
+    `).get(artist, title);
+    return row ? asJob(row) : null;
+  }
+
   get(id: number): UpgradeJob | null {
     const row = this.db.prepare('SELECT * FROM upgrade_queue WHERE id = ?').get(id);
     return row ? asJob(row) : null;
@@ -443,7 +546,20 @@ export class UpgradeStore {
     }
   }
 
-  claim(workerId: string, leaseSeconds = 7_200): (UpgradeJob & { attemptedCandidates: string[] }) | null {
+  /**
+   * Take the next due job.
+   *
+   * `phase` narrows what a sweep will pick up. Radio's fetch-ahead needs to
+   * run every couple of minutes to be any use, but the FLAC hunt it shares a
+   * queue with talks to Soulseek and must not: a source-only sweep lets the
+   * fast, cheap YouTube pulls run on a tight timer while the slow ones stay
+   * on the hourly one.
+   */
+  claim(
+    workerId: string,
+    leaseSeconds = 7_200,
+    phase?: UpgradePhase,
+  ): (UpgradeJob & { attemptedCandidates: string[] }) | null {
     const worker = workerId.trim().slice(0, 120);
     if (!worker) throw new Error('workerId is required');
     const at = nowIso(this.now);
@@ -459,11 +575,12 @@ export class UpgradeStore {
         SELECT * FROM upgrade_queue
         WHERE status IN ('pending_source', 'queued', 'retry_wait')
           AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+          AND (? IS NULL OR phase = ?)
         ORDER BY
           CASE status WHEN 'pending_source' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,
           CASE WHEN status = 'retry_wait' THEN random() ELSE id END
         LIMIT 1
-      `).get(at);
+      `).get(at, phase ?? null, phase ?? null);
       if (!row) {
         this.db.exec('COMMIT');
         return null;
@@ -513,9 +630,18 @@ export class UpgradeStore {
 
       if (input.outcome === 'source_ready') {
         if (!input.currentPath) throw new Error('source_ready requires currentPath');
-        status = isLosslessCodec(input.currentCodec) ? 'already_lossless' : 'queued';
         phase = 'upgrade';
-        nextAttempt = status === 'queued' ? at : null;
+        if (isLosslessCodec(input.currentCodec)) {
+          status = 'already_lossless';
+        } else if (job.auto_upgrade) {
+          status = 'queued';
+          nextAttempt = at;
+        } else {
+          // Parked, not finished: the file is on disk and playable, and the
+          // lossless hunt is simply not wanted yet. `retry` un-parks it, which
+          // is what the keep/like control does.
+          status = 'cancelled';
+        }
         error = null;
       } else if (input.outcome === 'upgraded') {
         if (!input.resultPath) throw new Error('upgraded requires resultPath');

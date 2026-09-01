@@ -592,6 +592,21 @@ export class ProvenanceStore {
     ).get(id) as ProvenanceRow | undefined) ?? null;
   }
 
+  /**
+   * Any scanned file matching an artist+title, best copy first.
+   *
+   * Radio resolves what it can through MusicBrainz ids, but the singles the
+   * app pulled from YouTube were never in Lidarr and so have no recording id
+   * at all. Name matching is the only handle on those, and `match_key` is
+   * already indexed for exactly this shape of question.
+   */
+  byMatchKey(key: string): ProvenanceRow | null {
+    return (this.handle().prepare(`
+      SELECT * FROM track_provenance WHERE match_key = ?
+      ORDER BY size_bytes DESC LIMIT 1
+    `).get(key) as ProvenanceRow | undefined) ?? null;
+  }
+
   /** Paths already scanned, with mtime+size, so the scanner can skip them. */
   fingerprints(): Map<string, string> {
     return new Map((this.handle()

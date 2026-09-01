@@ -168,6 +168,12 @@
       <b id="player-title">Choose a track</b>
       <span id="player-byline">Play from your downloaded collection</span>
     </div>
+    <!-- The most natural moment to want more like this is while it plays.
+         Hidden until there is a library track to seed a station from. -->
+    <a class="player-radio" id="player-radio" href="#radio" hidden
+       data-tip="Start a station from this song" aria-label="Radio from this song">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="14" r="2.6"/><path d="M6.1 8.6a8.4 8.4 0 0 1 11.8 0M8.9 11.4a4.5 4.5 0 0 1 6.2 0"/></svg>
+    </a>
   </div>
   <div class="player-transport">
     <div class="player-controls">
@@ -255,15 +261,51 @@ const PLAY = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 
 // The album id and cover travel with the button, so anything the player
 // builds from a queue - the queue list, the bar, the OS lock screen - can
 // show the same artwork as the page it was started from.
+// "More like this one." Only offered for tracks the library actually holds:
+// the station is seeded from the recording, and a track with no file has no
+// recording id to seed with.
+const RADIO_GLYPH = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="14" r="2.6"/><path d="M6.1 8.6a8.4 8.4 0 0 1 11.8 0M8.9 11.4a4.5 4.5 0 0 1 6.2 0"/></svg>';
+const radioControl = (track) => track.id && /^libtrack-/.test(String(track.id))
+  ? `<a class="track-radio" href="#radio/track/${esc(track.id)}" data-tip="Start a station from this song" aria-label="Radio from ${esc(track.name ?? '')}">${RADIO_GLYPH}</a>`
+  : '';
 const playControl = (track) => track.id ? `<button class="track-play" type="button" data-track-id="${esc(track.id)}" data-track-name="${esc(track.name)}" data-track-artists="${esc(track.artists ?? track.artist_name ?? '')}" data-track-duration="${Number(track.duration_ms ?? 0)}" data-track-album="${esc(track.album_id ?? '')}" data-track-image="${esc(track.image_url ?? '')}" aria-label="Play ${esc(track.name)}">${PLAY}</button>` : '';
 const upgradeControl = (track) => track.id ? `<button class="track-upgrade" type="button" data-upgrade-track="${esc(track.id)}" aria-label="Queue ${esc(track.name)} for a FLAC upgrade" title="Queue FLAC upgrade"><span>FLAC</span>&uarr;</button>` : '';
+/**
+ * "I want this one properly."
+ *
+ * Radio discoveries land at YouTube quality and stay there - a station plays
+ * dozens of tracks nobody chose, and hunting Soulseek for every one turns
+ * listening into a download campaign. This is how a track earns the lossless
+ * hunt. Keyed on artist+title rather than an id, because the thing being asked
+ * for may not exist in the library yet.
+ */
+const wantControl = (track) => track.artists && track.name
+  ? `<button class="track-upgrade" type="button" data-want-artist="${esc(track.artists)}" data-want-title="${esc(track.name)}" data-want-album="${esc(track.album ?? '')}" data-want-duration="${Number(track.duration_ms ?? 0)}" title="Get a lossless copy" aria-label="Get a lossless copy of ${esc(track.name)}"><span>FLAC</span>&uarr;</button>`
+  : '';
+
 // Ids the server serves art for directly, rather than the Spotify CDN.
 const localArt = (id) => /^(localalbum|libalbum)-/.test(String(id ?? ''));
+/**
+ * The letter a missing cover falls back to.
+ *
+ * `(name ?? '?')[0]` looked safe and was not: `??` catches null and undefined
+ * but not an EMPTY STRING, and `''[0]` is undefined, so `.toUpperCase()` threw
+ * and took the whole page down with it. Tool have a track called "[intro]",
+ * which the card's own title-stripping reduces to nothing - one real song title
+ * was enough to break Latest entirely.
+ */
+const initial = (name) => (String(name ?? '').trim()[0] ?? '?').toUpperCase();
+
+// An id names art we host; without one the remote url IS the source, which
+// is how an unreleased record - nothing on disk, nothing in Spotify - still
+// shows its Cover Art Archive sleeve. Relying on the onerror fallback instead
+// would mean shipping src="" , and an empty src resolves to the page itself
+// rather than failing, so the handler would never run.
 const pic = (kind, id, cdnUrl, name, overlay = '') => `
   <div class="pic">
-    <img src="${id ? (localArt(id) ? `/img/local/${esc(id)}.jpg` : `/img/${kind}/${esc(id)}.jpg`) : ''}" alt="" loading="lazy"
+    <img src="${id ? (localArt(id) ? `/img/local/${esc(id)}.jpg` : `/img/${kind}/${esc(id)}.jpg`) : esc(cdnUrl ?? '')}" alt="" loading="lazy"
          data-cdn="${esc(cdnUrl ?? '')}" onerror="imgErr(this)">
-    <div class="ph" style="display:none">${esc((name ?? '?')[0].toUpperCase())}</div>
+    <div class="ph" style="display:none">${esc(initial(name))}</div>
     ${overlay}
   </div>`;
 const spotify = (type, id) => `<a class="ext" href="https://open.spotify.com/${type}/${id}" target="_blank" rel="noopener" title="open in Spotify">↗</a>`;
@@ -542,6 +584,7 @@ const trackRow = (t, endText, rank) => {
     </div>
     ${mediaBadges(t)}
     <div class="end">${endText}</div>
+    ${radioControl(t)}
     ${upgradeControl(t)}
     ${spotify('track', t.id)}
   </div>`;
@@ -582,7 +625,11 @@ const gigCard = (e, i = 0) => {
 const albumCell = (a, when = '', extraClass = '') => {
   const id = a.id ?? a.album_id;
   const href = id ? `#album/${id}` : null;
-  const bareName = String(a.name ?? '').replace(/\s*[(\[]\d{4}[)\]].*$/, '').replace(/\s*\[[^\]]*\]\s*$/, '');
+  // Strip the "(2026) [Album]" folder noise - but never down to nothing. A
+  // title that is entirely bracketed ("[intro]") is the real name, not noise.
+  const rawName = String(a.name ?? '');
+  const stripped = rawName.replace(/\s*[(\[]\d{4}[)\]].*$/, '').replace(/\s*\[[^\]]*\]\s*$/, '').trim();
+  const bareName = stripped || rawName;
   const year = (a.release_date ?? '').slice(0, 4) || (String(a.name).match(/\((\d{4})\)/) ?? [])[1] || '';
   const type = (a.album_group && a.album_group !== 'album') ? a.album_group
     : (a.album_type === 'single' || a.kind === 'single') ? 'single' : '';
@@ -598,6 +645,85 @@ const albumCell = (a, when = '', extraClass = '') => {
       ${mediaBadges(a)}
     </div>
   </div>`;
+};
+
+// --- Song radio ------------------------------------------------------------
+//
+// A station is a mix of music the library holds and music it does not. The
+// second half is the point: it is how the collection grows past what Spotify
+// already told us about. Unowned tracks render as pending rows, get fetched
+// in the background, and turn into ordinary playable rows in place.
+
+const RADIO_STATE = {
+  'not-queued': 'queued shortly', pending_source: 'downloading', working: 'downloading',
+  queued: 'waiting', retry_wait: 'retrying', exhausted: 'could not find it',
+  cancelled: 'cancelled',
+};
+
+// A pending row carries everything the fetch and the re-check need, because
+// a track with no file has no id to look itself up by.
+const stationRow = (t) => t.pending ? `
+  <div class="row radio-pending" data-radio-key="${esc(t.recording_mbid ?? '')}"
+       data-radio-artist="${esc(t.artists ?? '')}" data-radio-title="${esc(t.name ?? '')}"
+       data-radio-album="${esc(t.album ?? '')}" data-radio-duration="${Number(t.duration_ms ?? 0)}"
+       data-radio-release="${esc(t.release_mbid ?? '')}">
+    <span class="rank"><span class="radio-dot" aria-hidden="true"></span></span>
+    <button class="radio-get" type="button"
+            data-want-artist="${esc(t.artists ?? '')}" data-want-title="${esc(t.name ?? '')}"
+            data-want-album="${esc(t.album ?? '')}" data-want-duration="${Number(t.duration_ms ?? 0)}"
+            data-want-recording="${esc(t.recording_mbid ?? '')}" data-want-release="${esc(t.release_mbid ?? '')}"
+            title="Download this one now, and hunt for a lossless copy"
+            aria-label="Download ${esc(t.name ?? '')}">${DL}</button>
+    <div class="mid"><div>${esc(t.name ?? '')}</div>
+      <div class="sub">${esc(t.artists ?? '')}${t.album ? ` · ${esc(t.album)}` : ''}</div></div>
+    <div class="song-badges"><span class="chip radio-new">new to you</span></div>
+    <div class="end radio-state">queued shortly</div>
+  </div>` : `
+  <div class="row">
+    <span class="rank">${PLAY_DOT}</span>
+    ${playControl(t)}
+    <div class="mid"><div>${esc(t.name ?? '')}</div>
+      <div class="sub">${esc(t.artists ?? '')}${t.album ? ` · ${esc(t.album)}` : ''}</div></div>
+    ${mediaBadges(t)}
+    <div class="end">${dur(t.duration_ms)}</div>
+    ${t.quality === 'lossless' || t.quality === 'hires' ? '' : wantControl(t)}
+    ${radioControl(t)}
+  </div>`;
+const PLAY_DOT = '<span class="radio-have" title="already in your library">●</span>';
+
+const stationLink = (kind, value, label, sub = '') => `
+  <a class="station-card" href="#radio/${kind}/${encodeURIComponent(value)}">
+    <span class="station-wave" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+    <b>${esc(label)}</b>${sub ? `<span class="sub">${esc(sub)}</span>` : ''}
+  </a>`;
+
+// New and upcoming records, from Lidarr's calendar rather than Spotify's.
+//
+// Two things this can say that the Spotify version never could: a record can
+// be in the FUTURE (announced, not out), and a record we already hold links
+// straight to its album page. Upcoming ones deliberately carry no link - there
+// is no page yet - and wear their release date in the pill the Latest tab
+// uses for download times, so the whole grid stays one component.
+const releaseDay = (iso) => {
+  const at = new Date(`${iso}T12:00:00`);
+  return Number.isNaN(at.getTime()) ? iso
+    : at.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+};
+const releaseSection = (rel) => {
+  const list = rel?.releases ?? [];
+  if (!list.length) return '';
+  const c = rel.counts ?? {};
+  const note = [
+    c.upcoming ? `${c.upcoming} still to come` : '',
+    c.missing ? `${c.missing} not downloaded` : '',
+  ].filter(Boolean).join(' · ');
+  return `<h2>New &amp; upcoming from the artists you follow</h2>
+    ${note ? `<p class="sub dim rel-note">${esc(note)}</p>` : ''}
+    <div class="al-grid">${list.map((r) => albumCell(
+      r,
+      r.upcoming ? `out ${releaseDay(r.release_date)}` : '',
+      r.upcoming ? 'al-upcoming' : '',
+    )).join('')}</div>`;
 };
 
 // One FLAC-queue job as a card. Top level rather than inline in the view so
@@ -649,7 +775,9 @@ const upgradeCard = (j) => {
 
 const views = {
   async overview() {
-    const [o, s, prov] = await Promise.all([api('/api/overview'), api('/api/stats'), api('/api/provenance')]);
+    const [o, s, prov, rel] = await Promise.all([
+      api('/api/overview'), api('/api/stats'), api('/api/provenance'), api('/api/releases'),
+    ]);
     const c = o.counts;
     const delta = o.playsPrev30 ? Math.round(((o.plays30 - o.playsPrev30) / o.playsPrev30) * 100) : null;
     const trend = delta == null ? 'The record starts here — every play in this player now counts too.'
@@ -731,7 +859,7 @@ const views = {
         ${originCard}
         ${lifetimeCard}
       </div>
-      ${s.releases?.length ? `<h2>New & upcoming from artists you follow (last 90 days)</h2><div class="al-grid">${s.releases.map((r) => albumCell(r)).join('')}</div>` : ''}`;
+      ${releaseSection(rel)}`;
   },
 
   async artists() {
@@ -1008,6 +1136,7 @@ const views = {
             <div class="sub">${esc(t.artists ?? '')}</div></div>
           ${mediaBadges(t)}
           <div class="end">${dur(t.duration_ms)}</div>
+          ${radioControl(t)}
           ${upgradeControl(t)}
           ${spotify('track', t.id)}
         </div>`).join('');
@@ -1031,9 +1160,188 @@ const views = {
       <h2>Tracks${d.tracks.length ? ` (${d.tracks.length} in library)` : ''}</h2>
       ${d.tracks.length ? list : '<div class="empty">track listing not hydrated yet — next sync runs will fill it in</div>'}`;
   },
+
+  // Station picker. Seeds come from what is actually played and what the
+  // library is made of, so the suggestions are never a generic genre list.
+  async radio() {
+    const lb = await api('/api/listenbrainz');
+    if (!lb.enabled) {
+      return `<div class="empty">Radio is off — no ListenBrainz token is configured.
+        Add <code>LISTENBRAINZ_TOKEN</code> to the server's .env and restart.</div>`;
+    }
+    const [top, stats] = await Promise.all([api('/api/top-artists'), api('/api/stats')]);
+    const artists = [...new Map((top ?? [])
+      .filter((a) => a.name).map((a) => [a.name, a])).values()].slice(0, 12);
+    const tags = (stats.genres ?? []).slice(0, 12);
+    const listens = lb.listens?.submitted ?? 0;
+    return `
+      <p class="lede">Pick a starting point. Every station mixes records you own with
+        records you do not — the new ones are fetched while the old ones play.</p>
+      <h2>Built from your listening</h2>
+      ${listens
+        ? `<div class="station-grid">
+             ${stationLink('stats', lb.user, 'Your top tracks', `${listens} listens reported`)}
+             ${stationLink('recs', lb.user, 'Recommended for you', 'ListenBrainz picks')}
+           </div>`
+        : `<div class="empty">Nothing reported to ListenBrainz yet — these two stations
+             switch on once you have played a few things. Every play is submitted
+             automatically as <b>${esc(lb.user || 'your account')}</b>.</div>`}
+      <h2>From artists you play</h2>
+      ${artists.length
+        ? `<div class="station-grid">${artists
+            .map((a) => stationLink('artist', a.name, a.name, 'and artists like them')).join('')}</div>`
+        : '<div class="empty">play something first and this fills itself in</div>'}
+      ${tags.length ? `<h2>By genre</h2>
+        <div class="station-grid">${tags
+          .map((g) => stationLink('tag', g.genre, g.genre, `${g.n} liked track${g.n === 1 ? '' : 's'}`)).join('')}</div>` : ''}`;
+  },
+
+  // One station. Rendered whole so the pending rows are visible from the
+  // start: a listener should see what is being fetched, not a short list that
+  // mysteriously grows.
+  async station(kind, value) {
+    // A song station is seeded from the track itself, so the server is given
+    // the track id and works the recording out; everything else is a name.
+    const query = kind === 'track'
+      ? `kind=track&from=${encodeURIComponent(value)}`
+      : `kind=${encodeURIComponent(kind)}&value=${encodeURIComponent(value)}`;
+    const data = await api(`/api/radio?${query}&limit=40`);
+    if (data.error || !data.tracks?.length) {
+      const why = data.error === 'ListenBrainz is not configured'
+        ? 'Radio is off — no ListenBrainz token is configured.'
+        : `Nothing came back for this station${data.error ? ` (${esc(data.error)})` : ''}.`;
+      return `<div class="empty">${why} <a href="#radio">Pick another</a></div>`;
+    }
+    const seed = data.seedTrack;
+    const label = kind === 'stats' ? 'Your top tracks'
+      : kind === 'recs' ? 'Recommended for you'
+      : kind === 'track' ? (seed ? `Songs like ${seed.title}` : 'Song radio')
+      : `${value} radio`;
+    // Say which question was actually answered. A song with no neighbours in
+    // the similarity data quietly becomes artist radio, and that is a
+    // different station than the one that was asked for.
+    const basis = kind !== 'track' ? ''
+      : data.source === 'similar' ? `songs that get played alongside this one${seed ? ` · ${seed.artist}` : ''}`
+      : data.source === 'similar+artist' ? 'few close matches for this song, so it widens out to the artist'
+      : 'nothing close enough to this song, so this is artist radio';
+    return `
+      <div class="station-head">
+        <div>
+          <h1>${esc(label)}</h1>
+          <div class="meta">${data.owned} in your library · ${data.fresh} new to you</div>
+          ${basis ? `<div class="meta dim">${esc(basis)}</div>` : ''}
+        </div>
+        <div class="hero-actions">
+          <button class="primary-action play-station" type="button">${PLAY} Play station</button>
+          ${kind === 'track' && seed ? `<a class="spbtn" href="#radio/artist/${encodeURIComponent(seed.artist)}">${esc(seed.artist)} radio</a>` : ''}
+          <a class="spbtn" href="#radio">Another station</a>
+        </div>
+      </div>
+      <div class="rows" id="station-rows">${data.tracks.map(stationRow).join('')}</div>`;
+  },
 };
 
 const after = {
+  /**
+   * Keep a station a few tracks ahead of the listener.
+   *
+   * Only the next few unowned tracks are fetched, not the whole station: a
+   * 40-track station abandoned after two songs would otherwise pull 38 albums
+   * nobody asked for. As each one lands, its row becomes an ordinary playable
+   * row, and if the station is already playing it is appended to the queue so
+   * playback simply continues into music that did not exist a minute ago.
+   */
+  station(el) {
+    // Keep this many fetches in flight - a LEAD, not a rate. The first
+    // version requested three more on every poll regardless of how many were
+    // already running, so a 40-track station queued all forty inside three
+    // minutes. A listener who skips away after two songs should not have left
+    // 38 downloads behind them.
+    const LEAD = 5;
+    // A track nobody can find must not hold a slot for ever; it stops counting
+    // as in-flight and the next candidate takes its place.
+    const GAVE_UP = new Set(['exhausted', 'cancelled']);
+
+    const pendingRows = () => [...el.querySelectorAll('.radio-pending')];
+    const keyOf = (row) => row.dataset.radioKey
+      || `${row.dataset.radioArtist}|${row.dataset.radioTitle}`;
+    const requested = new Set();
+    const specOf = (row) => ({
+      artist: row.dataset.radioArtist,
+      title: row.dataset.radioTitle,
+      album: row.dataset.radioAlbum || null,
+      durationMs: Number(row.dataset.radioDuration || 0) || null,
+      recordingMbid: row.dataset.radioKey || null,
+      // The release id is a direct key into Cover Art Archive: it is what
+      // lets a YouTube-sourced single wear the actual record sleeve.
+      releaseMbid: row.dataset.radioRelease || null,
+    });
+
+    const request = async (rows) => {
+      if (!rows.length) return;
+      rows.forEach((row) => { $('.radio-state', row).textContent = 'looking for it…'; });
+      try {
+        await fetch('/api/radio/fetch', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ tracks: rows.map(specOf) }),
+        });
+      } catch { /* the poll retries; a failed request is not fatal */ }
+    };
+
+    // Bring the number of running fetches back up to the lead, and no further.
+    const topUp = () => {
+      const rows = pendingRows();
+      const inFlight = rows.filter(
+        (row) => requested.has(keyOf(row)) && !row.classList.contains('radio-lost'),
+      ).length;
+      const need = Math.max(0, LEAD - inFlight);
+      if (!need) return;
+      const next = rows.filter((row) => !requested.has(keyOf(row))).slice(0, need);
+      next.forEach((row) => requested.add(keyOf(row)));
+      request(next);
+    };
+
+    const poll = async () => {
+      if (!el.isConnected) { clearInterval(timer); return; }
+      const rows = pendingRows();
+      if (!rows.length) { clearInterval(timer); return; }
+      let data;
+      try {
+        const response = await fetch('/api/radio/resolve', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ tracks: rows.map(specOf) }),
+        });
+        data = await response.json();
+      } catch { return; }
+      const byKey = new Map((data.results ?? []).map((r) => [r.key, r]));
+      const arrived = [];
+      for (const row of rows) {
+        const result = byKey.get(keyOf(row));
+        if (!result) continue;
+        if (result.ready && result.track) {
+          row.outerHTML = stationRow(result.track);
+          arrived.push(result.track);
+        } else {
+          $('.radio-state', row).textContent = RADIO_STATE[result.status] ?? result.status;
+          row.classList.toggle('radio-lost', GAVE_UP.has(result.status));
+        }
+      }
+      if (arrived.length) {
+        // Straight onto the end of the queue, so a station that is already
+        // playing carries on into the tracks it just went and got.
+        window.musicQueueAppend?.(arrived.map((t) => ({
+          id: t.id, name: t.name, artists: t.artists,
+          durationMs: t.duration_ms ?? 0, albumId: t.album_id ?? '', imageUrl: t.image_url ?? '',
+        })));
+        document.dispatchEvent(new CustomEvent('music:rendered'));
+      }
+      topUp();
+    };
+
+    topUp();
+    const timer = setInterval(poll, 12_000);
+  },
+
   cds(el) {
     const out = $('#cd-out', el);
     const q = $('#cd-q', el);
@@ -1541,7 +1849,7 @@ const after = {
   },
 };
 
-const TABS = { overview: 'Overview', latest: 'Latest', artists: 'Artists', liked: 'Songs', albums: 'Albums', playlists: 'Playlists', top: 'Top', shows: 'Shows', cds: 'CDs', upgrades: 'FLAC queue', plays: 'Plays' };
+const TABS = { overview: 'Overview', radio: 'Radio', latest: 'Latest', artists: 'Artists', liked: 'Songs', albums: 'Albums', playlists: 'Playlists', top: 'Top', shows: 'Shows', cds: 'CDs', upgrades: 'FLAC queue', plays: 'Plays' };
 const TAB_ICONS = {
   overview: '<svg viewBox="0 0 24 24"><path d="M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4zm10 0h6v6h-6z"/></svg>',
   artists: '<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>',
@@ -1549,6 +1857,7 @@ const TAB_ICONS = {
   albums: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2"/><path d="M12 3v3"/></svg>',
   playlists: '<svg viewBox="0 0 24 24"><path d="M4 6h11M4 11h11M4 16h7M18 14v6m-3-3h6"/></svg>',
   latest: '<svg viewBox="0 0 24 24"><path d="M12 4v16m8-8H4"/><circle cx="12" cy="12" r="9"/></svg>',
+  radio: '<svg viewBox="0 0 24 24"><circle cx="12" cy="14" r="3"/><path d="M5.6 8.4a9 9 0 0 1 12.8 0M8.5 11.3a5 5 0 0 1 7 0"/></svg>',
   top: '<svg viewBox="0 0 24 24"><path d="m12 3 2.7 5.5 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/></svg>',
   shows: '<svg viewBox="0 0 24 24"><path d="M6 3v18M18 3v18M6 7h12M6 17h12"/><path d="M10 11h4v2h-4z"/></svg>',
   upgrades: '<svg viewBox="0 0 24 24"><path d="M4 17h3l2-10 3 13 3-9 2 6h3"/><path d="m16 6 2-2 2 2M18 4v6"/></svg>',
@@ -1560,6 +1869,7 @@ const PAGE_COPY = {
   liked: ['Saved, remembered, searchable', 'Songs'], albums: ['The record shelf', 'Albums'],
   playlists: ['Your hand-built paths', 'Playlists'], top: ['Listening, counted honestly', 'Your top music'],
   latest: ['Freshly on disk', 'Latest downloads'],
+  radio: ['Everything you have not heard yet', 'Radio'],
   shows: ['Artists leaving the speakers', 'Upcoming shows'], upgrades: ['Lossless, eventually', 'FLAC upgrade queue'],
   cds: ['The discs on the shelf', 'CD collection'],
   plays: ['The latest signals', 'Recently played'],
@@ -1590,6 +1900,48 @@ document.addEventListener('click', async (event) => {
   }
 });
 
+/**
+ * "Get this one properly" — the escalation from passive to wanted.
+ *
+ * One handler for both shapes it takes: the FLAC arrow on a track radio found
+ * and already fetched, and the play button on one it has not fetched yet.
+ * Pressing play IS the signal — you would not press play on a song you did not
+ * want — so both send the same request and differ only in what they then say.
+ */
+document.addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-want-artist]');
+  if (!button || button.disabled) return;
+  event.preventDefault();
+  button.disabled = true;
+  const row = button.closest('.radio-pending');
+  const state = row ? $('.radio-state', row) : null;
+  if (state) state.textContent = 'looking for it…';
+  try {
+    const response = await fetch('/api/tracks/want', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        artist: button.dataset.wantArtist,
+        title: button.dataset.wantTitle,
+        album: button.dataset.wantAlbum || null,
+        durationMs: Number(button.dataset.wantDuration || 0) || null,
+        recordingMbid: button.dataset.wantRecording || null,
+        releaseMbid: button.dataset.wantRelease || null,
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `request failed (${response.status})`);
+    button.classList.add('queued');
+    notice(data.detail || 'Queued');
+    // A pending row is already being watched by the station poll, which will
+    // swap it for a playable one the moment the file lands.
+    if (!row) button.disabled = true;
+  } catch (err) {
+    notice(err.message, true);
+    if (state) state.textContent = 'could not queue it';
+    button.disabled = false;
+  }
+});
+
 // Skeleton rows shown only when a view takes noticeably long to arrive —
 // cached views paint before the timer fires and never flash it.
 const SKELETON = `<div class="skeleton">${'<div class="skeleton-row"><span></span><span></span></div>'.repeat(9)}</div>`;
@@ -1598,25 +1950,32 @@ let showGen = 0;
 async function show() {
   const gen = ++showGen;
   const hash = location.hash.slice(1);
-  const detail = hash.match(/^(artist|album|playlist)\/([A-Za-z0-9-]+)$/);
-  const tab = detail ? null : (TABS[hash] ? hash : 'overview');
-  nav.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.t === tab));
+  // A station seed is an artist name or a genre, not an id - so it gets its
+  // own permissive pattern rather than being squeezed into the id one.
+  const station = hash.match(/^radio\/(artist|tag|track|stats|recs)\/(.+)$/);
+  const detail = station ? null : hash.match(/^(artist|album|playlist)\/([A-Za-z0-9-]+)$/);
+  const tab = (detail || station) ? null : (TABS[hash] ? hash : 'overview');
+  nav.querySelectorAll('button').forEach(
+    (b) => b.classList.toggle('on', b.dataset.t === (station ? 'radio' : tab)));
   const DETAIL_COPY = {
     artist: ['Artist in your archive', 'Artist'],
     album: ['Release in your archive', 'Album'],
     playlist: ['A hand-built path', 'Playlist'],
   };
-  const copy = detail ? DETAIL_COPY[detail[1]] : PAGE_COPY[tab];
+  const copy = station ? ['Something you have not heard yet', 'Radio']
+    : detail ? DETAIL_COPY[detail[1]] : PAGE_COPY[tab];
   $('#page-kicker').textContent = copy[0];
   $('#page-title').textContent = copy[1];
   const main = $('#main');
   const skeletonTimer = setTimeout(() => { if (gen === showGen) { main.innerHTML = SKELETON; scrollTo(0, 0); } }, 90);
   try {
-    const html = await (detail ? views[detail[1]](detail[2]) : views[tab]());
+    const html = await (station ? views.station(station[1], decodeURIComponent(station[2]))
+      : detail ? views[detail[1]](detail[2]) : views[tab]());
     clearTimeout(skeletonTimer);
     if (gen !== showGen) return; // a newer navigation superseded this one
     main.innerHTML = html;
-    if (!detail) after[tab]?.(main);
+    if (station) after.station?.(main);
+    else if (!detail) after[tab]?.(main);
     scrollTo(0, 0);
     main.querySelectorAll('[data-tip]').forEach((el) => tipOn(el, el.dataset.tip));
     // A fresh view has no idea what is playing; the player re-marks it.

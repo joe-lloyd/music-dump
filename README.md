@@ -359,6 +359,180 @@ npm run fixture
 SPOTIFY_DB=./data/dev-fixture.db node src/server.ts
 ```
 
+## Song radio, and life after Spotify (ListenBrainz)
+
+Two things Spotify was still doing for this library got replaced on
+2026-09-01: telling us what our artists are releasing, and suggesting music we
+do not own. Neither answer comes from Spotify any more.
+
+### New & upcoming comes from Lidarr
+
+The overview's release grid used to be a Spotify query — albums whose artist
+carried Spotify's `is_followed` flag, discovered by crawling Spotify
+discographies. Lidarr's calendar answers the same question better:
+
+- it is the artists **actually being tracked** (284, all monitored), not
+  whoever Spotify thinks you follow;
+- it reaches into the **future**, so an announced-but-unreleased record shows
+  up with its date. Spotify only lists a record once it is out;
+- it knows whether the **files landed**, so a release either links to a real
+  album page or wears a release date and no link.
+
+Spotify still fills gaps for artists Lidarr has never been told about, and the
+counts say how many came from each (`fromLidarr` / `fromSpotify` on
+`/api/releases`). When that second number reaches zero the Spotify half can be
+deleted outright.
+
+### Radio
+
+`/api/radio?kind=artist&value=Converge` builds a station. Behind it:
+
+- **LB Radio** (`explore/lb-radio`) turns a prompt into recordings. Its prompt
+  language takes artists and tags, not recording ids, so a "play radio from
+  this track" seed is resolved back to its artist first.
+- **Recording MBIDs are the join key.** Lidarr stamps one on every track it
+  imports, and `lidarr_recording` in the taste DB caches it against the file
+  path — so "do we own this?" is an index lookup. 9072 of 9077 recordings
+  resolved to a real file when that map was first built. Tracks Lidarr never
+  saw (the YouTube singles) fall back to artist+title.
+- **A station is a mix.** Owned tracks and unowned ones interleave, leading
+  with an owned one so audio starts instantly. A station made only of music we
+  lack cannot play until a download finishes, which reads as "radio is broken".
+
+### Song radio vs artist radio
+
+They answer different questions and take different routes:
+
+| | seed | route | answers |
+|---|---|---|---|
+| **Song radio** | one recording | `similar-recordings` (labs) | songs played *alongside* this song |
+| **Artist radio** | an artist | LB Radio `artist:(…)` | songs by and around this band |
+
+The radio glyph on any library track row — and on the player bar while
+something plays — starts a song station. LB Radio's prompt language has no
+recording element, so asking it for a song would silently widen straight back
+out to the artist; only recording similarity answers the question asked. A
+Converge track returns Botch, Dillinger Escape Plan and Nails.
+
+Two things it has to survive:
+
+- **An obscure song has no neighbours.** Below 12 tracks the station widens to
+  the artist and says so on the page (`similar+artist`), rather than handing
+  back four tracks and calling it a station.
+- **File tags carry credits, not artists.** LB Radio resolves artists by exact
+  name and answers `artist:(Bonobo & Arooj Aftab)` with a flat *400 — could not
+  be looked up*, so a 2026 collaboration had no station at all. Fixed twice
+  over: Lidarr's own `artist_name`/`artist_mbid` is preferred (canonical, and
+  an MBID gives a wider net than a name — 34 distinct artists vs 28), and if
+  only a tag is available the full credit is tried **first**, reducing to the
+  lead artist only when ListenBrainz rejects it. That ordering is what keeps
+  "Simon & Garfunkel" and "AC/DC" intact — they resolve, so they are never cut.
+
+Similarity carries no duration, which the fetch-ahead needs to pick the right
+YouTube result, so one bulk `metadata/recording` call fills them in.
+
+**Diversity is a correctness requirement, not a nicety.** The raw similarity
+endpoint, seeded with a Converge track, returned 87 recordings that were —
+every single one — Tool. LB Radio diversifies internally (a Converge seed gives
+18 distinct artists across 44 tracks); the similarity fallback does not, so it
+is capped at two per artist and spaced so the same artist never lands twice in
+a row.
+
+### Fetch-ahead
+
+Unowned tracks are fetched while the owned ones play by queueing a
+`ytsearch5:` job for eliot's music-upgrader. It is a **lead of 5, not a rate**:
+the client keeps five fetches in flight and starts another only as one lands.
+
+That distinction was a bug first. The original version asked for three more on
+every 12-second poll regardless of how many were already running, so a
+40-track station queued all forty within about three minutes — a listener who
+skipped away after two songs left 38 downloads behind them. A track nobody can
+find stops counting against the lead, so the window slides past it rather than
+stalling on it.
+
+### Discovered vs wanted
+
+A track radio merely *played* is not a track you asked to own, and the two get
+different treatment:
+
+| | lands as | lossless hunt |
+|---|---|---|
+| radio fetch-ahead | YouTube single, parked | no |
+| pressed play on it | YouTube single | yes |
+| FLAC↑ on a radio track | (already on disk) | yes |
+
+Every imported single used to enter the Soulseek FLAC queue automatically. One
+evening of stations put **100 tracks** into it — passive listening had become a
+download campaign for music nobody chose. Now a discovered track lands
+playable and stops there, as a *parked* job: file on disk, nothing hunting for
+it. `auto_upgrade` on the queue row is the switch, and parking reuses the
+existing reversible park state rather than inventing a terminal one.
+
+`POST /api/tracks/want` is the single escalation point, and it is idempotent
+across all three states it can meet: nothing queued (fetch it, hunt enabled),
+parked by radio (promote it — the file is already there), or on disk but never
+queued (hunt from the file, no download). Both the FLAC↑ control and pressing
+play on a track we lack send exactly this — **pressing play IS the request**,
+since nobody plays a song they do not want. The player then watches for the
+file and starts playback itself when it lands.
+
+That last part is aimed squarely at the Spotify liked-songs list: press play on
+anything in it and the track is fetched, played, and queued for a real copy.
+
+**This path does not go through Lidarr.** It is deliberately the short one —
+app queue → worker → yt-dlp → `_Singles/<Artist>/<Title>.opus` — because radio
+needs a file within a song's length, and the Lidarr route (indexer search →
+qBittorrent or SABnzbd → import) takes minutes to hours and works in whole
+releases rather than single tracks. The cost is that radio discoveries land as
+standard-quality YouTube singles, tagged `source=youtube`, not proper releases.
+Promoting one you liked into a real lossless copy means adding the artist or
+album to Lidarr, which is not yet wired up. Fetching the whole
+station up front would pull 38 albums for a station abandoned after two songs.
+
+The known recording length is used to **choose** among search results rather
+than to reject whichever one came back: YouTube's top hit is regularly a live
+take, an hour-long mix, or a lyric video with a long intro. yt-dlp's
+`--match-filter` takes the first result inside a ±25% window. (A pasted link
+keeps the strict 3% check — there, a mismatch means the wrong video.)
+
+Because radio needs its fetches within a song's length, they run on their own
+two-minute `radio-fetch.timer` on eliot, restricted to `--phase source`. The
+FLAC upgrade jobs in the same queue talk to Soulseek and must **not** run that
+often; the phase filter is what keeps the two cadences apart.
+
+### Scrobbling
+
+Every play over 20s is submitted to ListenBrainz. This is the part that makes
+cancelling Spotify survivable: the listening history is rebuilt somewhere open
+and exportable, and it is what the `stats:` and `recs:` stations are computed
+from. `src/backfill-listens.ts` hands over the play history already in the
+taste DB so those stations do not have to wait months.
+
+Submissions go through a durable queue (`data/listenbrainz.db`), drained every
+five minutes:
+
+- a play is never lost to a network blip, and the player never waits on a
+  third party to finish a track;
+- **an auth or server failure does not consume the retry budget.** The account's
+  email was unverified on the first run and ListenBrainz refused every
+  submission with a 401 — counting those would have discarded the listens half
+  an hour later, destroying exactly what the queue exists to protect. Only a
+  genuinely rejected payload counts;
+- `--resubmit` unmarks everything and sends it again, because ListenBrainz
+  answers `{"status":"ok"}` before it has durably ingested anything, so a 200 is
+  an acknowledgement rather than a guarantee.
+
+### Configuration
+
+`LISTENBRAINZ_TOKEN` and `LISTENBRAINZ_USER` in the Pi's gitignored `.env`. A
+free account's user token. Without it the Radio tab says so and nothing else
+changes — the similarity endpoints it falls back to need no credentials.
+
+```sh
+docker compose exec web node --disable-warning=ExperimentalWarning   src/backfill-listens.ts --dry-run     # then without the flag
+```
+
 ## Deployment (pi-server)
 
 Runs on `pi-server` (192.168.2.23) as two containers from one compose file —

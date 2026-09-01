@@ -2439,3 +2439,202 @@ input[type="range"] {
     animation-delay: 0ms !important;
   }
 }
+
+/* --- Song radio ---------------------------------------------------------- */
+
+.lede {
+  max-width: 62ch;
+  margin: 0 0 22px;
+  color: var(--ink-2);
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.station-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 14px;
+  margin-bottom: 26px;
+}
+
+.station-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 16px 16px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--card);
+  color: var(--ink);
+  text-decoration: none;
+  transition: border-color .16s, background .16s, transform .16s;
+}
+
+.station-card:hover {
+  border-color: var(--accent);
+  background: var(--card-hover);
+  transform: translateY(-2px);
+}
+
+.station-card b { font-size: 15px; }
+.station-card .sub { color: var(--ink-3); font-size: 12.5px; }
+
+/* Four bars that lift on hover — the station is a signal, not a folder. */
+.station-wave {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 18px;
+  margin-bottom: 6px;
+}
+
+.station-wave i {
+  width: 3px;
+  height: 40%;
+  border-radius: 2px;
+  background: var(--accent);
+  opacity: .5;
+  transition: height .2s, opacity .2s;
+}
+
+.station-wave i:nth-child(2) { height: 75%; }
+.station-wave i:nth-child(3) { height: 55%; }
+.station-wave i:nth-child(4) { height: 90%; }
+.station-card:hover .station-wave i { opacity: 1; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .station-card:hover .station-wave i { animation: stationwave .9s ease-in-out infinite alternate; }
+  .station-card:hover .station-wave i:nth-child(2) { animation-delay: .12s; }
+  .station-card:hover .station-wave i:nth-child(3) { animation-delay: .24s; }
+  .station-card:hover .station-wave i:nth-child(4) { animation-delay: .36s; }
+}
+
+@keyframes stationwave { from { height: 35%; } to { height: 100%; } }
+
+.station-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  align-items: flex-end;
+  justify-content: space-between;
+  margin-bottom: 22px;
+}
+
+.station-head h1 { margin: 0 0 4px; font-size: 28px; }
+.station-head .meta { color: var(--ink-2); font-size: 13.5px; }
+
+/* A track already in the library: quiet confirmation, not decoration. */
+.radio-have { color: var(--accent); font-size: 9px; opacity: .65; }
+
+/* Not here yet. Dimmed because it cannot be played, but fully readable — it
+   is the half of the station that is the point. */
+.radio-pending { opacity: .62; }
+.radio-pending .mid > div:first-child { font-style: italic; }
+
+.radio-state {
+  color: var(--ink-3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.radio-pending.radio-lost { opacity: .38; }
+.radio-pending.radio-lost .radio-state { color: var(--bad); }
+
+.radio-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--violet);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .radio-dot { animation: radiodot 1.4s ease-in-out infinite; }
+}
+
+@keyframes radiodot { 0%, 100% { opacity: .3; } 50% { opacity: 1; } }
+
+.chip.radio-new {
+  border-color: rgba(161, 138, 252, .4);
+  color: var(--violet);
+}
+
+/* Announced but not out: the card is real, the record is not. */
+.al-card.al-upcoming .al-art { opacity: .78; }
+.al-card.al-upcoming .al-when {
+  color: var(--accent-ink);
+  background: var(--accent);
+  font-weight: 600;
+}
+
+.rel-note { margin: -6px 0 14px; font-size: 13px; }
+
+/* "More like this one" — a station seeded from one song rather than a band.
+   Quiet until hovered: it sits on every track row and must not compete with
+   the play button. */
+.track-radio,
+.player-radio {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  color: var(--ink-3);
+  text-decoration: none;
+  transition: color .16s, background .16s;
+}
+
+.track-radio svg,
+.player-radio svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+}
+
+.track-radio:hover,
+.player-radio:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.player-radio { margin-left: 6px; }
+
+.station-head .meta.dim { color: var(--ink-3); font-size: 12.5px; margin-top: 2px; }
+
+/* "Get this one now" on a track radio has found but not yet fetched. Shaped
+   like the play button it will become, so the row reads the same before and
+   after the file lands. Deliberately NOT class .track-play: the player builds
+   queues from those, and a track with no file yet cannot be queued. */
+.radio-get {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  color: var(--ink-2);
+  background: transparent;
+  cursor: pointer;
+  transition: color .16s, border-color .16s, background .16s;
+}
+
+.radio-get svg { width: 13px; height: 13px; fill: currentColor; }
+
+.radio-get:hover:not(:disabled) {
+  color: var(--accent-ink);
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.radio-get:disabled { opacity: .45; cursor: default; }
+
+.track-upgrade.queued { color: var(--accent); border-color: var(--accent); }

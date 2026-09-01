@@ -22,6 +22,7 @@
   const art = document.querySelector('#player-art');
   const artLink = document.querySelector('#player-art-link');
   const artFallback = document.querySelector('#player-art-fallback');
+  const radioLink = document.querySelector('#player-radio');
   const queueButton = document.querySelector('#queue-button');
   const queuePanel = document.querySelector('#queue-panel');
   const queueClose = document.querySelector('#queue-close');
@@ -173,6 +174,24 @@
       </button>`).join('') : '<div class="empty">Your queue is empty</div>';
   };
 
+  /**
+   * Add tracks to the end of the queue without disturbing what is playing.
+   *
+   * Radio needs this: a track it fetched arrives minutes after the station
+   * started, and rebuilding the queue from the page would restart playback.
+   * Exposed on window because the station view lives in the other script.
+   */
+  window.musicQueueAppend = (tracks) => {
+    const known = new Set(queue.map((item) => item.id));
+    const added = tracks.filter((item) => item.id && !known.has(item.id));
+    if (!added.length) return 0;
+    queue = queue.concat(added);
+    renderQueue();
+    save();
+    return added.length;
+  };
+  window.musicQueueHas = (id) => queue.some((item) => item.id === id);
+
   const setQueueFromButtons = (buttons, selectedId) => {
     const seen = new Set();
     queue = buttons.map((button) => ({
@@ -221,6 +240,14 @@
     ].filter(Boolean).join(' · ');
     artLink.href = href || '#';
     artLink.classList.toggle('linked', Boolean(href));
+    // "More like this one", seeded from the song rather than the band. Only a
+    // library track has a recording id behind it to seed with, so anything
+    // else hides the control rather than offering a station that cannot build.
+    const seedable = /^libtrack-/.test(String(track.id ?? ''));
+    if (radioLink) {
+      radioLink.hidden = !seedable;
+      radioLink.href = seedable ? `#radio/track/${encodeURIComponent(track.id)}` : '#radio';
+    }
     markNowPlaying(track.id);
   };
 
@@ -394,13 +421,66 @@
     renderLyrics();
   };
 
+  /**
+   * Ask the server to go and get a track we do not have, then watch for it.
+   *
+   * Bounded on purpose: a YouTube fetch takes seconds but the sweep that runs
+   * it is on a two-minute timer, and Jellyfin has to index the new file before
+   * it can stream. Five minutes covers the normal case; past that the track is
+   * still queued and will simply be there next time, so this stops watching
+   * rather than pretending something is wrong.
+   */
+  const watching = new Set();
+  const wantTrack = async (track) => {
+    const artist = (track.artists || '').split(',')[0].trim();
+    if (!artist || !track.name || watching.has(track.id)) return;
+    watching.add(track.id);
+    try {
+      const response = await fetch('/api/tracks/want', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          artist, title: track.name, album: track.album ?? null,
+          durationMs: track.duration_ms ?? null,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'could not queue it');
+      notify(data.detail || 'Fetching this track');
+      if (data.outcome === 'already-lossless') { watching.delete(track.id); return; }
+    } catch (err) {
+      notify(err.message, true);
+      watching.delete(track.id);
+      return;
+    }
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 15_000));
+      // Someone moved on; stop chasing a track they are no longer waiting for.
+      if (queue[queueIndex]?.id !== track.id) break;
+      try {
+        const check = await fetch(`/api/player/resolve?id=${encodeURIComponent(track.id)}`);
+        const status = check.ok ? await check.json() : null;
+        if (status?.available) {
+          notify(`${track.name} is here`);
+          playAt(queueIndex);
+          break;
+        }
+      } catch { /* keep waiting */ }
+    }
+    watching.delete(track.id);
+  };
+
   const showUnavailable = (result) => {
     bar.dataset.state = 'error';
     overline.textContent = result.reason === 'archive-offline' ? 'Archive asleep' : 'Unavailable locally';
     title.textContent = result.track?.name || queue[queueIndex]?.name || 'Cannot play this track';
     if (result.reason === 'not-matched' && result.track) {
+      // Pressing play on a song we do not have IS the request for it. Nobody
+      // plays a track they do not want, so this fetches it rather than just
+      // reporting the gap — YouTube now so it becomes playable, and the
+      // lossless hunt after, because this one was deliberately chosen.
+      void wantTrack(result.track);
       const query = encodeURIComponent(`${(result.track.artists || '').split(',')[0]} ${result.track.album || result.track.name}`.trim());
-      byline.innerHTML = `${escapeHtml(result.detail || 'No local file')} · <a href="https://bandcamp.com/search?q=${query}&item_type=a" target="_blank" rel="noopener">Bandcamp ↗</a>`;
+      byline.innerHTML = `Not in the library — getting it now · <a href="https://bandcamp.com/search?q=${query}&item_type=a" target="_blank" rel="noopener">Bandcamp ↗</a>`;
     } else {
       byline.textContent = result.detail || 'No local audio source is available';
     }
@@ -573,7 +653,9 @@
       return;
     }
 
-    const albumButton = event.target.closest('.play-album');
+    // A station plays exactly like an album does: everything on the page, in
+    // order. Only the pending rows differ, and those have no button yet.
+    const albumButton = event.target.closest('.play-album, .play-station');
     if (albumButton) {
       const buttons = [...document.querySelectorAll('#main .track-play')];
       if (!buttons.length) return;

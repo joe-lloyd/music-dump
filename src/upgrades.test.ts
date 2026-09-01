@@ -430,3 +430,210 @@ test('a parked or cancelled job can be resumed, a finished one cannot', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Radio's fetch-ahead has to run every couple of minutes to be any use, but
+// it shares a queue with the Soulseek FLAC hunt, which must not run that
+// often. Without a phase filter, the fast sweep would drag the slow work
+// along with it.
+test('a sweep can restrict itself to one phase of the queue', () => {
+  const f = fixture();
+  try {
+    const source = f.store.create({
+      artist: 'Botch', title: 'Thank God for the Worker Bees',
+      sourceUrl: 'ytsearch1:Botch Thank God for the Worker Bees', downloader: 'yt-dlp',
+    });
+    const upgrade = f.store.create({
+      trackId: 'track-1', artist: 'Converge', title: 'Concubine',
+      currentPath: '/data/library/music/a.mp3', currentCodec: 'mp3',
+    });
+    assert.equal(source.phase, 'source');
+    assert.equal(upgrade.phase, 'upgrade');
+
+    const onlyUpgrade = f.store.claim('worker-1', 600, 'upgrade');
+    assert.equal(onlyUpgrade?.id, upgrade.id, 'must skip the source job entirely');
+
+    const onlySource = f.store.claim('worker-2', 600, 'source');
+    assert.equal(onlySource?.id, source.id);
+
+    // Nothing of that phase left, even though other work exists.
+    assert.equal(f.store.claim('worker-3', 600, 'source'), null);
+  } finally {
+    f.close();
+  }
+});
+
+test('an unfiltered sweep still sees every phase', () => {
+  const f = fixture();
+  try {
+    f.store.create({
+      artist: 'Botch', title: 'Worker Bees',
+      sourceUrl: 'ytsearch1:Botch Worker Bees', downloader: 'yt-dlp',
+    });
+    assert.notEqual(f.store.claim('worker-1', 600), null);
+  } finally {
+    f.close();
+  }
+});
+
+// Fetch-ahead fires on every queue advance, so without this the same track
+// would be re-queued - and re-downloaded - on every tick.
+test('a queued fetch is found again rather than duplicated', () => {
+  const f = fixture();
+  try {
+    const job = f.store.create({
+      artist: 'Botch', title: 'Thank God for the Worker Bees',
+      sourceUrl: 'ytsearch1:x', downloader: 'yt-dlp',
+    });
+    assert.equal(f.store.findQueued('botch', 'THANK GOD FOR THE WORKER BEES')?.id, job.id);
+    assert.equal(f.store.findQueued('Botch', 'Something Else'), null);
+    f.store.cancel(job.id);
+    assert.equal(f.store.findQueued('Botch', 'Thank God for the Worker Bees'), null,
+      'a cancelled job must not block a fresh attempt');
+  } finally {
+    f.close();
+  }
+});
+
+// Radio plays dozens of tracks nobody chose. Sending every one to Soulseek
+// turned passive listening into a download campaign — 84 FLAC hunts queued
+// from one evening's stations. A discovered track lands playable and stops.
+test('a discovered track parks after sourcing instead of hunting for FLAC', () => {
+  const f = fixture();
+  try {
+    const job = f.store.create({
+      artist: 'Botch', title: 'Worker Bees',
+      sourceUrl: 'ytsearch5:Botch Worker Bees', downloader: 'yt-dlp',
+      autoUpgrade: false,
+    });
+    const claimed = f.store.claim('worker-1', 600)!;
+    const done = f.store.finish({
+      id: job.id, claimToken: claimed.claim_token!, outcome: 'source_ready',
+      currentPath: '/data/library/music/_Singles/Botch/Worker Bees.opus',
+      currentCodec: 'opus',
+    });
+    assert.equal(done.phase, 'upgrade');
+    assert.equal(done.status, 'cancelled', 'parked, not queued for Soulseek');
+    // Parked means nothing will pick it up.
+    assert.equal(f.store.claim('worker-2', 600), null);
+  } finally {
+    f.close();
+  }
+});
+
+test('a track asked for by name still goes on to hunt for FLAC', () => {
+  const f = fixture();
+  try {
+    const job = f.store.create({
+      artist: 'Botch', title: 'Worker Bees',
+      sourceUrl: 'ytsearch5:Botch Worker Bees', downloader: 'yt-dlp',
+    });
+    const claimed = f.store.claim('worker-1', 600)!;
+    const done = f.store.finish({
+      id: job.id, claimToken: claimed.claim_token!, outcome: 'source_ready',
+      currentPath: '/data/library/music/_Singles/Botch/Worker Bees.opus',
+      currentCodec: 'opus',
+    });
+    assert.equal(done.status, 'queued', 'default behaviour must be unchanged');
+  } finally {
+    f.close();
+  }
+});
+
+test('liking a parked track promotes it into the lossless hunt', () => {
+  const f = fixture();
+  try {
+    const job = f.store.create({
+      artist: 'Botch', title: 'Worker Bees',
+      sourceUrl: 'ytsearch5:Botch Worker Bees', downloader: 'yt-dlp',
+      autoUpgrade: false,
+    });
+    const claimed = f.store.claim('worker-1', 600)!;
+    f.store.finish({
+      id: job.id, claimToken: claimed.claim_token!, outcome: 'source_ready',
+      currentPath: '/data/library/music/_Singles/Botch/Worker Bees.opus',
+      currentCodec: 'opus',
+    });
+
+    const { job: promoted, changed } = f.store.promote(job.id);
+    assert.equal(changed, true);
+    assert.equal(promoted.status, 'queued');
+    assert.equal(f.store.claim('worker-2', 600, 'upgrade')?.id, job.id);
+  } finally {
+    f.close();
+  }
+});
+
+// Liking something twice, or liking what is already being worked on, must not
+// disturb it or double-queue it.
+test('promoting is idempotent and leaves working jobs alone', () => {
+  const f = fixture();
+  try {
+    const job = f.store.create({
+      trackId: 'track-1', artist: 'Converge', title: 'Concubine',
+      currentPath: '/data/library/music/a.mp3', currentCodec: 'mp3',
+    });
+    assert.equal(job.status, 'queued');
+    assert.equal(f.store.promote(job.id).changed, false, 'already wanted');
+    assert.equal(f.store.promote(job.id).job.status, 'queued');
+  } finally {
+    f.close();
+  }
+});
+
+// Promoting before the download lands has to survive the transition, or the
+// like is silently forgotten when the file arrives and parks itself.
+test('liking a track still downloading survives into the upgrade phase', () => {
+  const f = fixture();
+  try {
+    const job = f.store.create({
+      artist: 'Botch', title: 'Worker Bees',
+      sourceUrl: 'ytsearch5:Botch Worker Bees', downloader: 'yt-dlp',
+      autoUpgrade: false,
+    });
+    f.store.promote(job.id);
+    const claimed = f.store.claim('worker-1', 600)!;
+    const done = f.store.finish({
+      id: job.id, claimToken: claimed.claim_token!, outcome: 'source_ready',
+      currentPath: '/data/library/music/_Singles/Botch/Worker Bees.opus',
+      currentCodec: 'opus',
+    });
+    assert.equal(done.status, 'queued', 'the like must not be lost on landing');
+  } finally {
+    f.close();
+  }
+});
+
+// A parked job holds a real file. If it stopped blocking new fetches, radio
+// would re-download everything it parked in the window before the library
+// scanner notices the files.
+test('a parked track is not fetched a second time', () => {
+  const f = fixture();
+  try {
+    const job = f.store.create({
+      artist: 'Botch', title: 'Worker Bees',
+      sourceUrl: 'ytsearch5:x', downloader: 'yt-dlp', autoUpgrade: false,
+    });
+    const claimed = f.store.claim('worker-1', 600)!;
+    f.store.finish({
+      id: job.id, claimToken: claimed.claim_token!, outcome: 'source_ready',
+      currentPath: '/data/library/music/_Singles/Botch/Worker Bees.opus',
+      currentCodec: 'opus',
+    });
+    assert.equal(f.store.findQueued('Botch', 'Worker Bees')?.id, job.id);
+  } finally {
+    f.close();
+  }
+});
+
+test('a job cancelled before it downloaded anything can be asked for again', () => {
+  const f = fixture();
+  try {
+    const job = f.store.create({
+      artist: 'Botch', title: 'Worker Bees', sourceUrl: 'ytsearch5:x', downloader: 'yt-dlp',
+    });
+    f.store.cancel(job.id);
+    assert.equal(f.store.findQueued('Botch', 'Worker Bees'), null);
+  } finally {
+    f.close();
+  }
+});

@@ -76,6 +76,13 @@ services:
       DISCOGS_TOKEN: "${DISCOGS_TOKEN:-}"
       DISCOGS_CONSUMER_KEY: "${DISCOGS_CONSUMER_KEY:-}"
       DISCOGS_CONSUMER_SECRET: "${DISCOGS_CONSUMER_SECRET:-}"
+      # ListenBrainz: song radio, and scrobbling every play back so the
+      # listening history is rebuilt somewhere that is not Spotify. A free
+      # account's user token; without it the radio tab reports itself off and
+      # nothing else changes. The similarity endpoints it falls back to need
+      # no credentials at all.
+      LISTENBRAINZ_TOKEN: "${LISTENBRAINZ_TOKEN:-}"
+      LISTENBRAINZ_USER: "${LISTENBRAINZ_USER:-}"
     volumes:
       - .:/app
       # Read-only view of the music library so locally imported albums can

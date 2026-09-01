@@ -18,9 +18,11 @@ import {
   provenanceKey, type ProvenanceRow, type ScanInput,
 } from './provenance.ts';
 import {
-  UpgradeStore, localAlbumId, type BatchTrack, type LocalTrack, type SourceMode,
-  type UpgradeJob, validWorkerToken,
+  UpgradeStore, isLosslessCodec, localAlbumId, type BatchTrack, type LocalTrack,
+  type SourceMode, type UpgradeJob, validWorkerToken,
 } from './upgrades.ts';
+import { ListenBrainz, type RadioMode } from './listenbrainz.ts';
+import { RadioEngine, primaryArtist, type RadioEntry, type RadioSeed } from './radio.ts';
 
 const ROOT = path.join(import.meta.dirname, '..');
 const DB_FILE = process.env.SPOTIFY_DB ?? path.join(ROOT, 'data', 'spotify.db');
@@ -45,6 +47,156 @@ const upgrades = new UpgradeStore();
 const provenance = new ProvenanceStore();
 const shelf = new ShelfStore();
 const discogs = new DiscogsClient();
+const listenbrainz = new ListenBrainz();
+
+/**
+ * Recording MBID -> library path, from the map the Lidarr sync caches.
+ *
+ * Lidarr stamps a MusicBrainz recording id on every track it imports and
+ * writes files to the same paths the scanner reads, so this join is exact:
+ * 9072 of 9077 recordings resolved to a real file when it was first built.
+ */
+function ownedPathsFor(mbids: string[]): Map<string, string> {
+  const wanted = [...new Set(mbids.filter(Boolean))];
+  if (!wanted.length) return new Map();
+  const marks = wanted.map(() => '?').join(',');
+  try {
+    const rows = query(
+      `SELECT recording_mbid, path FROM lidarr_recording WHERE recording_mbid IN (${marks})`,
+      ...wanted,
+    ) as { recording_mbid: string; path: string }[];
+    return new Map(rows.map((row) => [row.recording_mbid.toLowerCase(), row.path]));
+  } catch {
+    // The table arrives with the Lidarr sync. Without it radio still works,
+    // it just believes we own nothing and falls back to name matching.
+    return new Map();
+  }
+}
+
+const radio = new RadioEngine(listenbrainz, provenance, ownedPathsFor);
+
+/**
+ * What MusicBrainz knows about a library file, if the Lidarr sync does.
+ *
+ * The artist matters as much as the recording. A file's tags carry a CREDIT
+ * ("Bonobo & Arooj Aftab") while Lidarr stores the artist ("Bonobo") and its
+ * MBID - and LB Radio answers a credit string with a 400, so seeding from the
+ * tag would leave every collaboration with no station.
+ */
+function recordingForPath(file: string): {
+  recordingMbid: string | null; artistMbid: string | null; artistName: string | null;
+} {
+  try {
+    const rows = query(
+      'SELECT recording_mbid, artist_mbid, artist_name FROM lidarr_recording WHERE path = ? LIMIT 1',
+      file,
+    ) as { recording_mbid: string; artist_mbid: string | null; artist_name: string | null }[];
+    const row = rows[0];
+    return {
+      recordingMbid: row?.recording_mbid ?? null,
+      artistMbid: row?.artist_mbid ?? null,
+      artistName: row?.artist_name ?? null,
+    };
+  } catch {
+    return { recordingMbid: null, artistMbid: null, artistName: null };
+  }
+}
+
+/** The MusicBrainz recording behind a library file, if the sync knows it. */
+function recordingMbidForPath(file: string): string | null {
+  return recordingForPath(file).recordingMbid;
+}
+
+/**
+ * Report a finished play to ListenBrainz.
+ *
+ * Queued rather than sent: this runs inside the request that records a play,
+ * and the player must not wait on a third party — nor lose the play if the
+ * house is offline. `flush` drains the queue in the background.
+ *
+ * The recording MBID is included when we know it, which turns a fuzzy
+ * name match on their side into an exact one.
+ */
+function scrobble(track: TasteTrack, msPlayed: number): void {
+  if (!listenbrainz.enabled) return;
+  const artist = (track.artists ?? '').split(',')[0].trim();
+  if (!artist || !track.name) return;
+  const row = provenance.trackById(track.id);
+  const recordingMbid = row ? recordingMbidForPath(row.path) : null;
+  try {
+    listenbrainz.enqueue({
+      // ListenBrainz timestamps a listen at its START, and we are called when
+      // it ends.
+      listenedAt: Math.floor((Date.now() - msPlayed) / 1000),
+      artist,
+      title: track.name,
+      album: track.album,
+      recordingMbid,
+    });
+  } catch (err) {
+    console.error('scrobble queue:', (err as Error).message);
+  }
+}
+
+/**
+ * A station entry in the shape every other surface already speaks, so the
+ * player, the queue and the cards need no radio-specific code path.
+ *
+ * Owned entries are indistinguishable from an album track — same id, same
+ * quality badges, same art. Unowned ones carry `pending: 1` and a synthetic
+ * id: they are real music with a real MusicBrainz identity, they just have no
+ * file yet, and the fetch-ahead turns them into the first kind.
+ */
+function radioTrack(entry: RadioEntry): Record<string, unknown> {
+  if (entry.owned && entry.row) {
+    const badge = badgeOf(entry.row);
+    return {
+      id: entry.trackId,
+      name: entry.row.title || entry.title,
+      album: entry.row.album ?? entry.album,
+      album_id: libAlbumId(entry.row.path),
+      artists: entry.row.artist || entry.artist,
+      duration_ms: entry.row.duration_ms ?? entry.durationMs,
+      track_number: entry.row.track_number,
+      disc_number: entry.row.disc_number ?? 1,
+      explicit: 0,
+      liked: 0,
+      local: 1,
+      pending: 0,
+      recording_mbid: entry.recordingMbid,
+      image_url: `/img/folder?rel=${encodeURIComponent(path.dirname(relOf(entry.row.path)))}`,
+      quality: badge.tier,
+      quality_label: badge.quality,
+      source: badge.source,
+      source_detail: badge.detail,
+    };
+  }
+  return {
+    id: `radio-${entry.recordingMbid}`,
+    name: entry.title,
+    album: entry.album,
+    album_id: null,
+    artists: entry.artist,
+    duration_ms: entry.durationMs,
+    track_number: null,
+    disc_number: 1,
+    explicit: 0,
+    liked: 0,
+    local: 0,
+    pending: 1,
+    recording_mbid: entry.recordingMbid,
+    release_mbid: entry.releaseMbid,
+    // Cover Art Archive serves release art by MBID and is built to be linked
+    // to directly; there is no local copy to serve for a record we lack.
+    image_url: entry.releaseMbid
+      ? `https://coverartarchive.org/release/${entry.releaseMbid}/front-250`
+      : null,
+    quality: null,
+    quality_label: null,
+    source: null,
+    source_detail: null,
+  };
+}
 const UPGRADE_WORKER_TOKEN = process.env.UPGRADE_WORKER_TOKEN ?? '';
 // Last time a failed resolve triggered a Jellyfin rescan; see /api/player/resolve.
 let lastMissRefresh = 0;
@@ -963,6 +1115,189 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
     source: album.source,
   })),
 
+  /**
+   * New and upcoming records from the artists we actually follow.
+   *
+   * This used to be a Spotify query: albums whose artist carried Spotify's
+   * `is_followed` flag, discovered by crawling Spotify discographies. That
+   * tied the most forward-looking part of the app to the one service we are
+   * trying to stop paying for, and it could only ever describe the past —
+   * Spotify lists a record once it is out.
+   *
+   * Lidarr's calendar is a better answer on every axis: it is the list of
+   * artists actually being tracked, it reaches into the FUTURE (announced but
+   * unreleased records), and it knows whether the files have landed, so a
+   * release can say "you have this" and link to the album page.
+   *
+   * Spotify still fills the gaps, for artists Lidarr has never been told
+   * about. When that list empties, the Spotify half can simply be deleted.
+   */
+  '/api/releases': () => {
+    let lidarrRows: {
+      foreign_album_id: string; artist_name: string; title: string; album_type: string;
+      release_date: string; cover_url: string | null; track_files: number;
+      total_tracks: number; folder: string | null;
+    }[] = [];
+    try {
+      lidarrRows = query(`
+        SELECT foreign_album_id, artist_name, title, album_type, release_date,
+               cover_url, track_files, total_tracks, folder
+        FROM lidarr_release ORDER BY release_date DESC
+      `) as typeof lidarrRows;
+    } catch {
+      lidarrRows = [];        // the sync has not run yet
+    }
+
+    const today = new Date().toISOString().slice(0, 10);
+    const releases = lidarrRows.map((row) => ({
+      // Held records get their real album id, so the card links to a page
+      // that plays. A record we do NOT have has no page to link to, and a
+      // dead link is worse than none - so it gets no id, and the card renders
+      // unlinked with its release date instead.
+      id: row.folder ? libAlbumIdForFolder(row.folder) : null,
+      release_mbid: row.foreign_album_id,
+      name: row.title,
+      artists: row.artist_name,
+      album_type: (row.album_type ?? 'Album').toLowerCase(),
+      release_date: row.release_date,
+      // Cover Art Archive, hotlinked. Only reached for records we do NOT
+      // have — anything on disk is served from the local file instead.
+      image_url: row.folder
+        ? `/img/folder?rel=${encodeURIComponent(relOf(row.folder))}`
+        : row.cover_url,
+      downloaded: row.track_files > 0 ? 1 : 0,
+      local: row.folder ? 1 : 0,
+      total_tracks: row.total_tracks,
+      upcoming: row.release_date > today ? 1 : 0,
+      playable: row.folder ? 1 : 0,
+      source: 'lidarr',
+    }));
+
+    const known = new Set(releases.map((r) => albumMatchKey(r.artists, r.name)));
+    const spotify = (query(`
+      SELECT al.id, al.name, al.album_type AS album_group, al.release_date, al.image_url,
+             (SELECT downloaded FROM album_download_status ds WHERE ds.album_id = al.id) AS downloaded,
+             (SELECT group_concat(a.name, ', ' ORDER BY aa.position)
+                FROM album_artists aa JOIN artists a ON a.id = aa.artist_id
+               WHERE aa.album_id = al.id) AS artists
+      FROM albums al
+      WHERE al.release_date >= date('now', '-90 days')
+        AND (EXISTS (SELECT 1 FROM artist_albums x JOIN artists a ON a.id = x.artist_id
+                      WHERE x.album_id = al.id AND a.is_followed = 1)
+          OR EXISTS (SELECT 1 FROM album_artists x JOIN artists a ON a.id = x.artist_id
+                      WHERE x.album_id = al.id AND a.is_followed = 1))
+      ORDER BY al.release_date DESC LIMIT 36
+    `) as Record<string, string | number | null>[])
+      .filter((row) => !known.has(albumMatchKey(String(row.artists ?? ''), String(row.name ?? ''))))
+      .map((row) => ({
+        id: String(row.id),
+        name: String(row.name ?? ''),
+        artists: String(row.artists ?? ''),
+        album_type: String(row.album_group ?? 'album'),
+        release_date: String(row.release_date ?? ''),
+        image_url: row.image_url ? String(row.image_url) : null,
+        downloaded: row.downloaded ? 1 : 0,
+        local: 0,
+        total_tracks: 0,
+        upcoming: 0,
+        playable: 0,
+        source: 'spotify',
+      }));
+
+    const all = [...releases, ...spotify]
+      .sort((a, b) => String(b.release_date).localeCompare(String(a.release_date)));
+    return {
+      releases: all,
+      counts: {
+        total: all.length,
+        fromLidarr: releases.length,
+        fromSpotify: spotify.length,
+        upcoming: all.filter((r) => r.upcoming).length,
+        missing: all.filter((r) => !r.downloaded).length,
+      },
+    };
+  },
+
+  /**
+   * A station from a seed. Owned tracks come back ready to play; the rest
+   * come back as candidates the client can ask to have fetched.
+   *
+   * Seeding by track resolves the artist behind it, because LB Radio's prompt
+   * language takes artists and tags, not recordings — the recording id is
+   * kept for the similarity fallback, which does take one.
+   */
+  '/api/radio': async (params) => {
+    if (!listenbrainz.enabled) {
+      return { tracks: [], source: 'none', error: 'ListenBrainz is not configured' };
+    }
+    const kindParam = String(params.get('kind') ?? 'artist');
+    const kinds = ['artist', 'tag', 'track', 'stats', 'recs'];
+    const kind = (kinds.includes(kindParam) ? kindParam : 'artist') as RadioSeed['kind'];
+    let value = String(params.get('value') ?? '').trim();
+    let recordingMbid = String(params.get('mbid') ?? '').trim() || undefined;
+
+    // Seeded from one specific song. The artist is kept as the widening
+    // prompt (LB Radio has no recording element) while the recording id is
+    // what actually drives "songs like this song".
+    const from = String(params.get('from') ?? '').trim();
+    let seedTrack: { title: string; artist: string } | null = null;
+    if (from) {
+      const row = provenance.trackById(from);
+      if (row) {
+        const known = recordingForPath(row.path);
+        seedTrack = { title: row.title, artist: known.artistName || row.artist };
+        if (!recordingMbid) recordingMbid = known.recordingMbid ?? undefined;
+        // An MBID is unambiguous and gives a wider net than the name does;
+        // Lidarr's artist name is next best; the file's credit string is the
+        // last resort, and only after the guest credits are stripped off it.
+        value = value
+          || known.artistMbid
+          || known.artistName
+          || primaryArtist(row.artist);
+      }
+    }
+    if (kind === 'stats' || kind === 'recs') value = value || listenbrainz.user;
+    if (!value && !recordingMbid) {
+      return { tracks: [], source: 'none', error: 'nothing to build a station from' };
+    }
+
+    const modeParam = String(params.get('mode') ?? 'medium');
+    const mode = (['easy', 'medium', 'hard'].includes(modeParam) ? modeParam : 'medium') as RadioMode;
+    const limit = Math.min(Math.max(Number(params.get('limit') ?? 40) || 40, 5), 100);
+
+    let station: { entries: RadioEntry[]; source: string };
+    try {
+      station = await radio.station({ kind, value }, { mode, limit, recordingMbid });
+    } catch (err) {
+      return { tracks: [], source: 'none', error: (err as Error).message };
+    }
+    return {
+      seed: { kind, value },
+      seedTrack,
+      // A song seed with no recording id could only ever have become artist
+      // radio; saying so beats silently answering a different question.
+      seededOnRecording: Boolean(recordingMbid),
+      source: station.source,
+      tracks: station.entries.map((entry) => radioTrack(entry)),
+      owned: station.entries.filter((entry) => entry.owned).length,
+      fresh: station.entries.filter((entry) => !entry.owned).length,
+    };
+  },
+
+  /** Whether radio and scrobbling are live, and how the backlog is doing. */
+  '/api/listenbrainz': () => ({
+    enabled: listenbrainz.enabled,
+    user: listenbrainz.user || null,
+    listens: listenbrainz.enabled ? listenbrainz.stats() : null,
+    recordings: (() => {
+      try {
+        return (query('SELECT COUNT(*) n FROM lidarr_recording')[0] as { n: number }).n;
+      } catch {
+        return 0;
+      }
+    })(),
+  }),
+
   '/api/albums': () => [
     // Locally imported albums are real music in the library, so they belong
     // in the same grid as saved Spotify albums - flagged downloaded, because
@@ -1492,7 +1827,14 @@ const server = http.createServer(async (req, res) => {
       try {
         const body = await readJson(req, 512_000);
         if (url.pathname.endsWith('/claim')) {
-          const job = upgrades.claim(String(body.workerId ?? ''), Number(body.leaseSeconds ?? 7_200));
+          // A sweep may restrict itself to one phase, so the fast radio
+          // fetches can run on a tight timer without dragging the Soulseek
+          // upgrade hunt along with them.
+          const wanted = String(body.phase ?? '');
+          const phase = wanted === 'source' || wanted === 'upgrade' ? wanted : undefined;
+          const job = upgrades.claim(
+            String(body.workerId ?? ''), Number(body.leaseSeconds ?? 7_200), phase,
+          );
           json(res, 200, { job });
           return;
         }
@@ -1676,9 +2018,254 @@ const server = http.createServer(async (req, res) => {
           return;
         }
         appPlays.record(track.id, ms, Boolean(body.completed));
+        scrobble(track, ms);
         res.writeHead(204).end();
       } catch {
         res.writeHead(400).end();
+      }
+      return;
+    }
+    /**
+     * Fetch-ahead for radio: turn candidates the library lacks into real files.
+     *
+     * The client asks for the next few unowned tracks while the current one is
+     * still playing, so by the time the queue reaches them the audio exists.
+     * Asking per-batch rather than fetching the whole station on generation is
+     * deliberate — a 40-track station the listener abandons after two songs
+     * would otherwise pull 38 albums nobody wanted.
+     *
+     * `ytsearch5:` is a yt-dlp search expression, not a URL, so it bypasses
+     * the SOURCE_HOSTS check that guards operator-pasted links. That is safe
+     * here: the text is an artist and title from ListenBrainz, and the worker
+     * passes argv as a list, so there is no shell to inject into.
+     */
+    if (url.pathname === '/api/radio/fetch') {
+      if (req.method !== 'POST') {
+        res.writeHead(405, { allow: 'POST' }).end();
+        return;
+      }
+      try {
+        const body = await readJson(req);
+        const wanted = Array.isArray(body.tracks) ? body.tracks.slice(0, 5) : [];
+        const created: { artist: string; title: string; id: number }[] = [];
+        const skipped: { artist: string; title: string; reason: string }[] = [];
+        for (const raw of wanted as Record<string, unknown>[]) {
+          const artist = String(raw.artist ?? '').replace(/[\r\n]/g, ' ').trim();
+          const title = String(raw.title ?? '').replace(/[\r\n]/g, ' ').trim();
+          if (!artist || !title) continue;
+          // Already on disk under this name — nothing to fetch.
+          if (provenance.byMatchKey(provenanceKey(artist, title))) {
+            skipped.push({ artist, title, reason: 'already in the library' });
+            continue;
+          }
+          const existing = upgrades.findQueued(artist, title);
+          if (existing) {
+            skipped.push({ artist, title, reason: `already queued (#${existing.id})` });
+            continue;
+          }
+          const duration = Number(raw.durationMs);
+          const job = upgrades.create({
+            artist,
+            title,
+            album: raw.album ? String(raw.album) : null,
+            durationMs: Number.isFinite(duration) && duration > 0 ? Math.round(duration) : null,
+            // Several results, not one: the worker filters them by the known
+            // recording length and takes the first that fits, which is what
+            // keeps a live take or an hour-long mix out of the library.
+            sourceUrl: `ytsearch5:${artist} ${title}`,
+            downloader: 'yt-dlp',
+            sourceMode: 'single',
+            // Radio plays dozens of tracks nobody chose. They land at YouTube
+            // quality and stay there; sending every one to Soulseek would turn
+            // listening into a download campaign. /api/tracks/want is how a
+            // track earns the lossless hunt.
+            autoUpgrade: false,
+            // The MusicBrainz identity travels with the job: the release id
+            // is a direct key into Cover Art Archive, so the worker can give
+            // a YouTube-sourced single real album art instead of nothing.
+            recordingMbid: raw.recordingMbid ? String(raw.recordingMbid) : null,
+            releaseMbid: raw.releaseMbid ? String(raw.releaseMbid) : null,
+          });
+          created.push({ artist, title, id: job.id });
+        }
+        res.writeHead(200, { 'content-type': 'application/json' })
+          .end(JSON.stringify({ created, skipped }));
+      } catch (err) {
+        res.writeHead(400, { 'content-type': 'application/json' })
+          .end(JSON.stringify({ error: (err as Error).message }));
+      }
+      return;
+    }
+    /**
+     * Has a fetched-ahead radio track landed yet?
+     *
+     * A pending track has no library id until the file exists, because the id
+     * is derived from its path - so the client cannot simply poll for one. It
+     * asks by name instead, and gets back either a fully playable track or the
+     * queue state explaining why not.
+     */
+    if (url.pathname === '/api/radio/resolve') {
+      if (req.method !== 'POST') {
+        res.writeHead(405, { allow: 'POST' }).end();
+        return;
+      }
+      try {
+        const body = await readJson(req);
+        const wanted = Array.isArray(body.tracks) ? body.tracks.slice(0, 40) : [];
+        const results = (wanted as Record<string, unknown>[]).map((raw) => {
+          const artist = String(raw.artist ?? '').trim();
+          const title = String(raw.title ?? '').trim();
+          const key = String(raw.recordingMbid ?? `${artist}|${title}`);
+          const row = provenance.byMatchKey(provenanceKey(artist, title));
+          if (row) {
+            return {
+              key,
+              ready: true,
+              track: radioTrack({
+                recordingMbid: String(raw.recordingMbid ?? ''),
+                title, artist, artistMbids: [], album: row.album,
+                releaseMbid: null, durationMs: row.duration_ms,
+                owned: true, trackId: libTrackId(row.path), path: row.path, row,
+              }),
+            };
+          }
+          const job = upgrades.findQueued(artist, title);
+          return {
+            key,
+            ready: false,
+            status: job ? job.status : 'not-queued',
+            error: job?.last_error ?? null,
+          };
+        });
+        res.writeHead(200, { 'content-type': 'application/json' })
+          .end(JSON.stringify({ results }));
+      } catch (err) {
+        res.writeHead(400, { 'content-type': 'application/json' })
+          .end(JSON.stringify({ error: (err as Error).message }));
+      }
+      return;
+    }
+    /**
+     * The artwork backfill's shopping list.
+     *
+     * Radio singles that landed before jobs carried a MusicBrainz identity
+     * have no way to find their album art. This resolves each one by name
+     * through ListenBrainz (cached, and stored back on the job so it is done
+     * once), and answers with everything the eliot-side script needs: the
+     * file path and a Cover Art Archive URL. Bounded per call - lookups are
+     * one request each against a shared public API.
+     */
+    if (url.pathname === '/api/radio/enrich') {
+      if (!listenbrainz.enabled) {
+        json(res, 503, { error: 'ListenBrainz is not configured' });
+        return;
+      }
+      const jobs = upgrades.sourcedSingles();
+      const out: Record<string, unknown>[] = [];
+      let lookups = 0;
+      for (const job of jobs) {
+        let release = job.release_mbid;
+        if (!release && lookups < 25) {
+          lookups += 1;
+          try {
+            const found = await listenbrainz.lookup(job.artist, job.title);
+            if (found) {
+              upgrades.attachMbids(job.id, found.recordingMbid, found.releaseMbid);
+              release = found.releaseMbid;
+            }
+          } catch {
+            break;        // rate limited - the next call carries on from here
+          }
+        }
+        out.push({
+          id: job.id,
+          artist: job.artist,
+          title: job.title,
+          album: job.album,
+          path: job.current_path,
+          release_mbid: release,
+          cover: release ? `https://coverartarchive.org/release/${release}/front-500` : null,
+        });
+      }
+      json(res, 200, {
+        singles: out,
+        withArt: out.filter((row) => row.cover).length,
+        unresolved: out.filter((row) => !row.cover).length,
+      });
+      return;
+    }
+
+    /**
+     * "I actually want this one."
+     *
+     * The single escalation point for a track the library does not properly
+     * have: pressing play on an undownloaded song, or liking something radio
+     * turned up. Both mean the same thing, so both land here.
+     *
+     * Three states to reconcile, and it is idempotent across all of them:
+     *   - nothing queued  -> fetch it from YouTube, lossless hunt enabled
+     *   - parked by radio -> promote it; the file is already on disk
+     *   - on disk, lossy, no job -> queue the lossless hunt from the file
+     */
+    if (url.pathname === '/api/tracks/want') {
+      if (req.method !== 'POST') {
+        res.writeHead(405, { allow: 'POST' }).end();
+        return;
+      }
+      try {
+        const body = await readJson(req);
+        const artist = String(body.artist ?? '').replace(/[\r\n]/g, ' ').trim();
+        const title = String(body.title ?? '').replace(/[\r\n]/g, ' ').trim();
+        if (!artist || !title) throw new Error('artist and title are required');
+        const album = body.album ? String(body.album) : null;
+        const duration = Number(body.durationMs);
+        const durationMs = Number.isFinite(duration) && duration > 0 ? Math.round(duration) : null;
+
+        const existing = upgrades.findQueued(artist, title);
+        if (existing) {
+          const { job, changed } = upgrades.promote(existing.id);
+          json(res, 200, {
+            outcome: changed ? 'promoted' : 'already-wanted',
+            job,
+            detail: changed
+              ? 'Queued for a lossless upgrade'
+              : `Already ${job.status.replace('_', ' ')}`,
+          });
+          return;
+        }
+
+        // On disk already but never queued - the lossless hunt can start from
+        // the file itself, no download needed.
+        const row = provenance.byMatchKey(provenanceKey(artist, title));
+        if (row) {
+          if (isLosslessCodec(row.codec)) {
+            json(res, 200, { outcome: 'already-lossless', detail: 'Already lossless in the library' });
+            return;
+          }
+          const job = upgrades.create({
+            artist, title, album: row.album ?? album,
+            durationMs: row.duration_ms ?? durationMs,
+            currentPath: row.path, currentCodec: row.codec,
+            autoUpgrade: true,
+          });
+          json(res, 200, { outcome: 'upgrading', job, detail: 'Hunting for a lossless copy' });
+          return;
+        }
+
+        const job = upgrades.create({
+          artist, title, album, durationMs,
+          sourceUrl: `ytsearch5:${artist} ${title}`,
+          downloader: 'yt-dlp',
+          sourceMode: 'single',
+          // Deliberate: you asked for this one, so it gets the full path -
+          // YouTube now so it is playable, Soulseek after for the real copy.
+          autoUpgrade: true,
+          recordingMbid: body.recordingMbid ? String(body.recordingMbid) : null,
+          releaseMbid: body.releaseMbid ? String(body.releaseMbid) : null,
+        });
+        json(res, 200, { outcome: 'fetching', job, detail: 'Getting it from YouTube now' });
+      } catch (err) {
+        json(res, 400, { error: (err as Error).message });
       }
       return;
     }
@@ -1896,4 +2483,22 @@ const server = http.createServer(async (req, res) => {
 });
 
 ensureLidarrTables();
+/**
+ * Drain queued listens to ListenBrainz.
+ *
+ * On a timer rather than inline with the play that created them: a listen is
+ * worth keeping even when the network is not there, and a submission failure
+ * must never surface as a failed play. Runs a first pass shortly after boot
+ * so a restart picks up anything stranded by the last one.
+ */
+if (listenbrainz.enabled) {
+  const drain = () => {
+    void listenbrainz.flush().then((sent) => {
+      if (sent) console.log(`listenbrainz: submitted ${sent} listen(s)`);
+    }).catch((err) => console.error('listenbrainz flush:', (err as Error).message));
+  };
+  setTimeout(drain, 10_000).unref();
+  setInterval(drain, 5 * 60_000).unref();
+}
+
 server.listen(PORT, () => console.log(`taste-db ui on :${PORT}, db: ${DB_FILE}`));
