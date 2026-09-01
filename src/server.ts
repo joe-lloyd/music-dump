@@ -1089,6 +1089,11 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
     const indexed = jellyfin.indexedRelPaths();
     return rows.map(({ rel, ...row }) => ({
       ...row,
+      // Spotify artwork when the taste DB has it, otherwise the cover Lidarr
+      // wrote into the folder. Singles live as a file rather than a directory,
+      // so those fall back to the artist folder's art.
+      image_url: row.image_url
+        ?? (rel ? `/img/folder?rel=${encodeURIComponent(String(rel))}` : null),
       // null = index unavailable (eliot asleep, first load): unknown, and
       // unknown must not be shown as broken.
       playable: indexed ? indexed.has(String(rel ?? '')) : null,
@@ -1532,6 +1537,36 @@ const server = http.createServer(async (req, res) => {
       res.end(readFileSync(staticFile.file));
       return;
     }
+    // Cover art for any album folder in the library, Spotify-known or not.
+    // Lidarr's metadata writer puts cover.jpg beside the audio; this reads it
+    // and nothing else, so it works for every album the library holds rather
+    // than only the ones the taste DB happens to carry artwork for.
+    const folderImage = url.pathname === '/img/folder';
+    if (folderImage) {
+      const rel = url.searchParams.get('rel') ?? '';
+      // Resolve, then verify containment: a rel of "../../etc" must not escape.
+      const dir = path.resolve(APP_LIBRARY_PREFIX, rel);
+      const root = path.resolve(APP_LIBRARY_PREFIX);
+      if (!rel || (dir !== root && !dir.startsWith(root + path.sep))) {
+        res.writeHead(400).end();
+        return;
+      }
+      for (const name of ['cover.jpg', 'folder.jpg', 'cover.png', 'folder.png']) {
+        try {
+          const body = readFileSync(path.join(dir, name));
+          res.writeHead(200, {
+            'content-type': name.endsWith('.png') ? 'image/png' : 'image/jpeg',
+            'cache-control': 'public, max-age=86400',
+          });
+          res.end(body);
+          return;
+        } catch { /* try the next filename */ }
+      }
+      // 404 rather than a placeholder: the UI already draws its own initial.
+      res.writeHead(404).end();
+      return;
+    }
+
     // Locally archived cover art (survives content being pulled from Spotify).
     // Locally imported albums have no Spotify artwork. Prefer the cover file
     // sitting beside the audio (the intake writes one); fall back to asking

@@ -766,8 +766,15 @@ const views = {
   // Playlists as a shelf, not a switcher: each card wears a collage of the
   // covers inside it, and the songs live on a detail page of their own.
   async playlists() {
-    const pls = await api('/api/playlists');
-    if (!pls.length) return '<div class="empty">no playlists synced yet</div>';
+    const all = await api('/api/playlists');
+    // Spotify's API refuses to enumerate some playlists (algorithmic ones,
+    // and anything it decides this app may not read), so they sync with zero
+    // tracks. A card that opens to an empty page is worse than no card.
+    const pls = all.filter((p) => Number(p.synced_tracks ?? 0) > 0);
+    if (!pls.length) {
+      return `<div class="empty">no playlists with readable tracks yet${
+        all.length ? ` — ${all.length} synced but returned no songs (see the README on the Spotify API limitation)` : ''}</div>`;
+    }
     const card = (p) => {
       const art = (p.images ?? []).slice(0, 4);
       const collage = art.length
@@ -782,7 +789,9 @@ const views = {
         </div>
       </div>`;
     };
-    return `<div class="al-grid pl-grid">${pls.map(card).join('')}</div>`;
+    const hidden = all.length - pls.length;
+    return `${hidden ? `<p class="note">${hidden} playlist${hidden === 1 ? '' : 's'} hidden — Spotify returned no tracks for ${hidden === 1 ? 'it' : 'them'}.</p>` : ''}
+      <div class="al-grid pl-grid">${pls.map(card).join('')}</div>`;
   },
 
   async playlist(id) {
