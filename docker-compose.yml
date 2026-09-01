@@ -64,7 +64,13 @@ services:
       ELIOT_WAKE_URL: "http://192.168.2.23:7777/wake"
       # Shared only with eliot's one-shot music-upgrader worker. Browser
       # queue/create endpoints never receive it; claim/complete require it.
+      # The library scanner posts audio-quality and provenance rows with the
+      # same token — same trusted worker, same trust boundary.
       UPGRADE_WORKER_TOKEN: "${UPGRADE_WORKER_TOKEN:-}"
+      # Personal access token from discogs.com/settings/developers. Read-only
+      # use: the CDs tab syncs the collection and searches the catalogue.
+      # Absent just means the tab reports itself unconfigured.
+      DISCOGS_TOKEN: "${DISCOGS_TOKEN:-}"
     volumes:
       - .:/app
       # Read-only view of the music library so locally imported albums can

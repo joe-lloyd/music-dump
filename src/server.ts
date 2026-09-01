@@ -5,10 +5,14 @@ import path from 'node:path';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { Readable } from 'node:stream';
+import {
+  DiscogsClient, DiscogsError, ShelfStore, albumKey, toShelfItem, type ShelfStatus,
+} from './discogs.ts';
 import { JellyfinBridge, LOCAL_LIBRARY_PREFIX, type TasteTrack } from './jellyfin.ts';
 import { LyricsService } from './lyrics.ts';
 import { resolveViaSearch } from './musicbrainz.ts';
 import { APP_PLAYS_FILE, PlaysStore } from './plays.ts';
+import { ProvenanceStore, provenanceKey, type ScanInput } from './provenance.ts';
 import {
   UpgradeStore, localAlbumId, type BatchTrack, type LocalTrack, type SourceMode,
   type UpgradeJob, validWorkerToken,
@@ -32,6 +36,9 @@ const jellyfin = new JellyfinBridge();
 const lyrics = new LyricsService();
 const appPlays = new PlaysStore();
 const upgrades = new UpgradeStore();
+const provenance = new ProvenanceStore();
+const shelf = new ShelfStore();
+const discogs = new DiscogsClient();
 const UPGRADE_WORKER_TOKEN = process.env.UPGRADE_WORKER_TOKEN ?? '';
 const SOURCE_HOSTS = new Set([
   'open.spotify.com', 'spotify.link',
@@ -325,6 +332,67 @@ function ensureLidarrTables(): void {
   } catch (err) {
     console.error('ensureLidarrTables:', (err as Error).message);
   }
+}
+
+/**
+ * Attach the quality tier and origin badge to every track-shaped row on the
+ * way out.
+ *
+ * Doing it here rather than in each handler means one rule for the whole API:
+ * anything with a name and an artist credit gets badged, so the Songs page,
+ * search, an album's tracklist, Latest and Plays all agree without ten
+ * near-identical joins. Rows with no scanned file simply come back unbadged.
+ */
+function decorateBadges(value: unknown, depth = 0): unknown {
+  if (depth > 2 || value == null) return value;
+  if (Array.isArray(value)) {
+    const badges = provenance.badges();
+    if (!badges.size) return value;
+    for (const entry of value) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+      const row = entry as Record<string, unknown>;
+      if (typeof row.name !== 'string') continue;
+      const artist = row.artists ?? row.artist_name ?? row.artist;
+      if (typeof artist !== 'string') continue;
+      const badge = badges.get(provenanceKey(artist, row.name));
+      if (badge) {
+        row.quality = badge.tier;
+        row.quality_label = badge.quality;
+        row.source = row.source ?? badge.source;
+        row.source_detail = badge.detail;
+      }
+    }
+    return value;
+  }
+  if (typeof value === 'object') {
+    for (const nested of Object.values(value as Record<string, unknown>)) {
+      if (Array.isArray(nested)) decorateBadges(nested, depth + 1);
+    }
+  }
+  return value;
+}
+
+/** Albums the library actually holds, keyed for matching against the shelf. */
+function libraryAlbumKeys(): Set<string> {
+  const keys = new Set<string>();
+  for (const row of query(
+    'SELECT al.name AS album, (SELECT a.name FROM album_artists aa JOIN artists a ON a.id = aa.artist_id'
+    + ' WHERE aa.album_id = al.id ORDER BY aa.position LIMIT 1) AS artist'
+    + ' FROM albums al WHERE al.is_saved = 1',
+  ) as { album: string | null; artist: string | null }[]) {
+    const key = albumKey(row.artist ?? '', row.album ?? '');
+    if (key) keys.add(key);
+  }
+  // Everything actually on disk, which is the real question the shelf asks.
+  for (const row of provenance.rowsForAlbums()) {
+    const key = albumKey(row.artist, row.album ?? '');
+    if (key) keys.add(key);
+  }
+  for (const album of localAlbums()) {
+    const key = albumKey(String(album.artists ?? ''), String(album.name ?? ''));
+    if (key) keys.add(key);
+  }
+  return keys;
 }
 
 const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown>> = {
@@ -931,6 +999,49 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
 
   // Newest finished downloads, by what is actually on disk.
   '/api/latest': (params) => latestDownloads(Math.min(Number(params.get('limit') ?? 60), 200)),
+
+  // How the library breaks down by origin and by fidelity - the numbers behind
+  // the badges, for the Overview page.
+  '/api/provenance': () => provenance.summary(),
+
+  // The physical shelf. Reconciled on read so a disc ripped since the last
+  // visit shows as ripped without a manual step; that is a cheap set lookup
+  // per disc, and the shelf is at most a few hundred rows.
+  '/api/cds': () => {
+    let reconciled = 0;
+    try {
+      reconciled = shelf.reconcile(libraryAlbumKeys());
+    } catch (err) {
+      console.error('shelf reconcile:', (err as Error).message);
+    }
+    const items = shelf.list();
+    return {
+      configured: discogs.configured,
+      sync: shelf.lastSync(),
+      reconciled,
+      counts: {
+        total: items.length,
+        shelf: items.filter((item) => item.status === 'shelf').length,
+        ripping: items.filter((item) => item.status === 'ripping').length,
+        ripped: items.filter((item) => item.status === 'ripped').length,
+        skip: items.filter((item) => item.status === 'skip').length,
+      },
+      items,
+    };
+  },
+
+  '/api/cds/search': async (params) => {
+    const term = (params.get('q') ?? '').trim();
+    if (!term) return { results: [] };
+    if (!discogs.configured) return { results: [], error: 'Discogs is not configured' };
+    const owned = new Set(shelf.list().map((item) => item.release_id));
+    return {
+      results: (await discogs.search(term)).map((release) => ({
+        ...toShelfItem(release),
+        owned: owned.has(Number(release.basic_information?.id ?? release.id)),
+      })),
+    };
+  },
 };
 
 const server = http.createServer(async (req, res) => {
@@ -1125,6 +1236,92 @@ const server = http.createServer(async (req, res) => {
       }
       return;
     }
+    // The library scanner on eliot posts here. Same worker token as the
+    // upgrade queue: both are the same trusted process writing derived state,
+    // and neither is reachable without it.
+    if (url.pathname === '/api/provenance/scan') {
+      if (req.method !== 'POST') {
+        json(res, 405, { error: 'POST only' });
+        return;
+      }
+      if (!UPGRADE_WORKER_TOKEN) {
+        json(res, 503, { error: 'upgrade worker token is not configured' });
+        return;
+      }
+      if (!workerAuthorized(req)) {
+        json(res, 401, { error: 'invalid worker token' });
+        return;
+      }
+      try {
+        // 4 MB: a scan batch of a few thousand rows, well under the whole
+        // library in one shot so a stall cannot pin the process.
+        const body = await readJson(req, 4_000_000);
+        const rows = Array.isArray(body.files) ? body.files as ScanInput[] : [];
+        const written = provenance.upsert(rows);
+        // Only a full scan may prune; an incremental batch does not know what
+        // it left out, and pruning on that would delete most of the library.
+        let pruned = 0;
+        if (body.complete === true && Array.isArray(body.allPaths)) {
+          pruned = provenance.prune((body.allPaths as unknown[]).map(String));
+        }
+        json(res, 200, { written, pruned, summary: provenance.summary() });
+      } catch (err) {
+        json(res, 400, { error: (err as Error).message });
+      }
+      return;
+    }
+
+    if (url.pathname.startsWith('/api/cds/') && url.pathname !== '/api/cds/search') {
+      if (req.method !== 'POST') {
+        json(res, 405, { error: 'POST only' });
+        return;
+      }
+      try {
+        const body = await readJson(req);
+        if (url.pathname === '/api/cds/sync') {
+          const identity = await discogs.identity();
+          const releases = await discogs.collection(identity.username);
+          const result = shelf.sync(releases, identity.username);
+          const reconciled = shelf.reconcile(libraryAlbumKeys());
+          json(res, 200, { username: identity.username, ...result, reconciled });
+          return;
+        }
+        if (url.pathname === '/api/cds/add') {
+          const releaseId = Number(body.releaseId ?? 0);
+          if (!releaseId) {
+            json(res, 400, { error: 'releaseId is required' });
+            return;
+          }
+          const item = shelf.add({
+            id: releaseId,
+            basic_information: (body.release as Record<string, unknown> | undefined) ?? { id: releaseId },
+          });
+          json(res, item ? 200 : 400, item ? { item } : { error: 'could not add that release' });
+          return;
+        }
+        if (url.pathname === '/api/cds/status') {
+          const releaseId = Number(body.releaseId ?? 0);
+          const item = shelf.setStatus(
+            releaseId,
+            String(body.status ?? '') as ShelfStatus,
+            body.ripPath == null ? null : String(body.ripPath),
+          );
+          json(res, item ? 200 : 404, item ? { item } : { error: 'no such disc' });
+          return;
+        }
+        if (url.pathname === '/api/cds/remove') {
+          const removed = shelf.remove(Number(body.releaseId ?? 0));
+          json(res, removed ? 200 : 404, removed ? { removed: true } : { error: 'no such disc' });
+          return;
+        }
+        json(res, 404, { error: 'not found' });
+      } catch (err) {
+        const status = err instanceof DiscogsError ? err.status : 400;
+        json(res, status, { error: (err as Error).message });
+      }
+      return;
+    }
+
     if (url.pathname === '/api/player/wake') {
       if (req.method !== 'POST') {
         res.writeHead(405, { allow: 'POST', 'content-type': 'application/json' });
@@ -1213,7 +1410,7 @@ const server = http.createServer(async (req, res) => {
     if (handler) {
       // Serialize BEFORE writeHead — a handler that throws mid-write would
       // otherwise crash the process with ERR_HTTP_HEADERS_SENT.
-      const body = JSON.stringify(await handler(url.searchParams));
+      const body = JSON.stringify(decorateBadges(await handler(url.searchParams)));
       res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
       res.end(body);
       return;

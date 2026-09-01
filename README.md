@@ -109,6 +109,82 @@ to seek, and a per-track ±0.5 s nudge (persisted in the browser) corrects
 drifting timing. Plain lyrics render without fake timing; instrumentals and
 no-matches stay quiet.
 
+## Quality and source badges
+
+Every track row carries two badges: what fidelity the file actually is, and
+which pipeline produced it. `src/provenance.ts` holds the model, a scanner on
+eliot (`HomeLab: eliot/acquisition/music-upgrader/library_scan.py`) fills it,
+and `data/provenance.db` stores one row per audio file.
+
+**Quality tiers.** Lossless is decided by codec alone — a FLAC's nominal
+bitrate describes the music, not the fidelity, so it never reaches the lossy
+thresholds. Only inside lossless does bit depth / sample rate split `hires`
+out. Lossy files fall on bitrate:
+
+| Tier | Rule | What it is here |
+|---|---|---|
+| `hires` | lossless, ≥24-bit or >48 kHz | 1,869 files, mostly modern WEB-FLAC |
+| `lossless` | FLAC / ALAC / WAV / APE | the bulk of the library |
+| `high` | ≥256 kbps | MP3-320 and AAC-256 from usenet |
+| `standard` | ≥96 kbps | YouTube's best Opus stream (itag 251) |
+| `low` | <96 kbps | YouTube fallback streams, old MP3s |
+
+The 96 kbps floor is deliberate. YouTube's itag 251 measures anywhere from 110
+to 160 kbps depending on the material, so a quiet track and a loud one from the
+*same download* would otherwise land in different tiers. The exact figure is
+always printed next to the badge, so nothing is hidden by the bucketing.
+
+The badge encodes the tier three ways at once — filled bars, colour, and the
+literal figure — so it stays readable at 9 px and does not depend on telling
+magenta from gold.
+
+**Sources.** `youtube`, `cd`, `usenet`, `torrent`, `soulseek`, `unknown`. The
+usenet/torrent split is an exact join through Lidarr's history rather than a
+guess; the indexer name rides along in the tooltip.
+
+**How rows get badged.** Provenance is recorded per *file path*, but the Songs
+page renders Spotify track rows that have no path. Resolving those through
+Jellyfin would mean a fuzzy match per row on every render, so each scanned file
+also stores a normalized `artist|title` key built with the same normalizer the
+Jellyfin matcher uses. `decorateBadges()` then attaches the badge to any
+track-shaped row on the way out of the API — one rule for the whole surface, so
+Songs, search, album tracklists, Latest and Plays all agree. A song with no
+scanned file simply comes back unbadged.
+
+`GET /api/provenance` returns the counts behind it all.
+
+> **Note on NULs.** The key separator is `|`. It was briefly a NUL byte, which
+> SQLite's C API silently truncates a bound string at — every key stored as
+> just the artist, and every lookup missed. `syntax.test.ts` now fails on a NUL
+> byte anywhere in `src/`.
+
+## CDs tab — the physical shelf
+
+Discs owned on CD, synced from a Discogs collection, tracked through to ripped.
+Discogs is the catalogue of record for physical media: it has the pressing, the
+catalogue number and the year, which is what tells two editions of one album
+apart.
+
+- **Sync** pulls the whole collection (folder `0` = Discogs' "All", so custom
+  folders need no enumeration). Catalogue fields refresh on every sync;
+  `status`, `notes` and `rip_path` are yours and are never overwritten.
+- **Statuses** cycle `To rip → Ripping → Ripped`, with `Skip` as the escape
+  hatch. A disc that leaves your Discogs collection is dropped from the shelf
+  *unless* it has been ripped — the library still has that music.
+- **Reconciliation** runs on every page load: any `shelf` disc whose album now
+  exists in the library flips to `ripped` on its own. Matching strips the
+  edition noise Discogs titles carry (`(Remastered)`, `[Deluxe Edition]`) that
+  a library folder never has.
+
+Ripping happens with whatever tool you like (EAC, whipper, abcde) into a `_CD/`
+folder; the app detects the files and flips the status. It does not drive a
+drive.
+
+Needs a personal access token from
+<https://www.discogs.com/settings/developers> in `DISCOGS_TOKEN`. Without one
+the tab renders setup instructions instead of failing. The token's own account
+is resolved via `/oauth/identity`, so there is no username to configure.
+
 ## MP3/album intake and automatic FLAC upgrades
 
 The **FLAC queue** tab closes the gap between "I want this song now" and "a

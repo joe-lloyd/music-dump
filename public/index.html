@@ -447,11 +447,59 @@ const slimRow = (t, endText) => `
     ${playControl(t)}
     <span class="heart">${t.liked || (t.added_at && !t.removed_at) ? '♥' : ''}</span>
     <div class="mid"><div>${esc(t.name)} ${t.removed_at ? chip(`un-liked ${day(t.removed_at)}`, true) : ''}</div></div>
+    ${mediaBadges(t)}
     <div class="end">${endText ?? dur(t.duration_ms)}</div>
     ${upgradeControl(t)}
     ${spotify('track', t.id)}
   </div>`;
 const songGroup = (al) => groupHead(al) + `<div class="rows">${al.tracks.map((t) => slimRow(t)).join('')}</div>`;
+
+// Quality and origin badges.
+//
+// The server attaches `quality` (tier), `quality_label` (the exact figure) and
+// `source` to any track it has scanned. Tier is encoded three ways at once -
+// how many bars are filled, the colour, and the text - so it survives being
+// read at 9px, in either theme, and by anyone who does not see the hues.
+// Colour alone only separates lossless from lossy from hi-res; the ordering
+// inside lossy is carried by the bars.
+const QUALITY_META = {
+  hires: { bars: 4, cls: 'q-hires', tip: 'Hi-res lossless' },
+  lossless: { bars: 4, cls: 'q-lossless', tip: 'Lossless' },
+  high: { bars: 3, cls: 'q-high', tip: 'High-bitrate lossy' },
+  standard: { bars: 2, cls: 'q-standard', tip: 'Standard lossy — YouTube grade' },
+  low: { bars: 1, cls: 'q-low', tip: 'Low bitrate' },
+};
+const SOURCE_META = {
+  youtube: { tip: 'From YouTube', svg: '<rect x="2.5" y="5" width="19" height="14" rx="4.5"/><path d="m10.2 8.9 5.2 3.1-5.2 3.1z"/>' },
+  cd: { tip: 'Ripped from CD', svg: '<circle cx="12" cy="12" r="8.6"/><circle cx="12" cy="12" r="2.3"/>' },
+  usenet: { tip: 'From usenet', svg: '<path d="M7.4 15.6a3.7 3.7 0 0 1 .7-7.3 4.8 4.8 0 0 1 9.1 1.2 3.3 3.3 0 0 1-.2 6.1"/><path d="M12 11.5v7.2m-2.7-2.7L12 18.7l2.7-2.7"/>' },
+  torrent: { tip: 'From a torrent', svg: '<path d="M8 4.2v10.4m0 0-2.8-2.8M8 14.6l2.8-2.8"/><path d="M16 19.8V9.4m0 0-2.8 2.8M16 9.4l2.8 2.8"/>' },
+  soulseek: { tip: 'From Soulseek', svg: '<circle cx="12" cy="5.2" r="2.1"/><circle cx="5.2" cy="18" r="2.1"/><circle cx="18.8" cy="18" r="2.1"/><path d="m10.9 7.1-4.6 8.8M13.1 7.1l4.6 8.8M7.3 18h9.4"/>' },
+  unknown: { tip: 'Source not recorded', svg: '<circle cx="12" cy="12" r="8.6"/><path d="M9.7 9.7a2.4 2.4 0 1 1 2.6 3.4v1"/><path d="M12.3 16.6v.01"/>' },
+};
+
+const qualityBadge = (t) => {
+  const meta = QUALITY_META[t.quality];
+  if (!meta) return '';
+  const bars = [1, 2, 3, 4].map((n) => `<i${n <= meta.bars ? ' class="on"' : ''}></i>`).join('');
+  const tip = `${meta.tip}${t.quality_label ? ` · ${t.quality_label}` : ''}`;
+  return `<span class="q-badge ${meta.cls}" data-tip="${esc(tip)}"><span class="q-bars">${bars}</span>${
+    t.quality_label ? `<b>${esc(t.quality_label)}</b>` : ''}</span>`;
+};
+
+const sourceBadge = (t) => {
+  const meta = SOURCE_META[t.source];
+  // `source` is also set on play rows to mark where a play happened, which is
+  // a different vocabulary — only render it when it names a real pipeline.
+  if (!meta || !t.quality) return '';
+  const tip = t.source_detail ? `${meta.tip} · ${t.source_detail}` : meta.tip;
+  return `<span class="s-badge s-${t.source}" data-tip="${esc(tip)}"><svg viewBox="0 0 24 24" aria-hidden="true">${meta.svg}</svg></span>`;
+};
+
+const mediaBadges = (t) => {
+  const html = qualityBadge(t) + sourceBadge(t);
+  return html ? `<div class="song-badges">${html}</div>` : '<div class="song-badges"></div>';
+};
 
 // Track row: internal album link, explicit ↗ for Spotify. `gone` greys +
 // badges rows that were un-liked / removed from a playlist.
@@ -469,6 +517,7 @@ const songCard = (t, meta = '') => {
       <span class="song-sub">${esc(t.artists ?? t.artist_name ?? '')}</span>
       ${t.album ? `<span class="song-album">${albumHref ? `<a href="${albumHref}">${esc(t.album)}</a>` : esc(t.album)}</span>` : ''}
     </div>
+    ${mediaBadges(t)}
     <div class="song-end">
       <span class="song-dur">${dur(t.duration_ms)}</span>
       ${meta ? `<small>${esc(meta)}</small>` : ''}
@@ -487,6 +536,7 @@ const trackRow = (t, endText, rank) => {
       <div>${esc(t.name)} ${gone ? chip(`removed ${day(gone)}`, true) : ''}</div>
       <div class="sub">${esc(t.artists ?? '')}${t.album ? ` · <a href="${albumHref ?? '#'}">${esc(t.album)}</a>` : ''}</div>
     </div>
+    ${mediaBadges(t)}
     <div class="end">${endText}</div>
     ${upgradeControl(t)}
     ${spotify('track', t.id)}
@@ -788,6 +838,43 @@ const views = {
       ${d.liked.length ? `<h2>Liked tracks</h2><div class="rows">${d.liked.map((t) => trackRow(t, day(t.added_at))).join('')}</div>` : ''}`;
   },
 
+  // The physical shelf. Discogs is the catalogue of record for pressings, so
+  // the collection is synced from there rather than retyped here; this page
+  // is about which of those discs still needs ripping.
+  async cds() {
+    const d = await api('/api/cds');
+    if (!d.configured && !d.items.length) {
+      return `<div class="empty cd-setup">
+        <p><b>Discogs is not connected yet.</b></p>
+        <p>Generate a personal access token at
+          <a href="https://www.discogs.com/settings/developers" target="_blank" rel="noreferrer">discogs.com/settings/developers</a>
+          &rarr; <i>Generate new token</i>, then add it to the Pi's
+          <code>.env</code> as <code>DISCOGS_TOKEN</code> and restart the web container.</p>
+        <p>Once it is set, this page syncs your Discogs collection and tracks which
+          discs are still waiting to be ripped.</p>
+      </div>`;
+    }
+    const tiles = [
+      ['To rip', d.counts.shelf], ['Ripping', d.counts.ripping],
+      ['Ripped', d.counts.ripped], ['On the shelf', d.counts.total],
+    ].map(([label, n]) => `<div class="tile"><b>${n}</b><span>${label}</span></div>`).join('');
+    const synced = d.sync.synced_at
+      ? `synced ${day(d.sync.synced_at)}${d.sync.username ? ` from ${esc(d.sync.username)}` : ''}`
+      : 'never synced';
+    return `
+      <div class="tiles">${tiles}</div>
+      <div class="tools cd-tools">
+        <button class="primary-action" id="cd-sync" type="button">Sync from Discogs</button>
+        <span class="sub" id="cd-synced">${synced}</span>
+        <span class="cd-filters" id="cd-filters">
+          ${[['shelf', 'To rip'], ['ripping', 'Ripping'], ['ripped', 'Ripped'], ['skip', 'Skipped'], ['all', 'All']]
+            .map(([k, label]) => `<button data-f="${k}"${k === 'shelf' ? ' class="on"' : ''} type="button">${label}</button>`).join('')}
+        </span>
+        <input type="search" id="cd-q" placeholder="Filter the shelf..." autocomplete="off">
+      </div>
+      <div class="cd-grid" id="cd-out"></div>`;
+  },
+
   async album(id) {
     const d = await api(`/api/album?id=${id}`);
     if (!d.album) return '<div class="empty">unknown album</div>';
@@ -834,6 +921,108 @@ const views = {
 };
 
 const after = {
+  cds(el) {
+    const out = $('#cd-out', el);
+    const q = $('#cd-q', el);
+    const filters = $('#cd-filters', el);
+    let items = [];
+    let filter = 'shelf';
+
+    const STATUS_LABEL = { shelf: 'To rip', ripping: 'Ripping', ripped: 'Ripped', skip: 'Skipped' };
+    // Ordered so the button always offers the next sensible step; skip is the
+    // escape hatch and lives on its own control.
+    const NEXT = { shelf: 'ripping', ripping: 'ripped', ripped: 'shelf', skip: 'shelf' };
+
+    const card = (c) => {
+      const meta = [c.year, c.format, c.catno].filter(Boolean).join(' · ');
+      return `<div class="cd-card cd-${c.status}" data-id="${c.release_id}">
+        <div class="cd-art">${c.thumb_url
+          ? `<img src="${esc(c.thumb_url)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
+          : `<span class="ph">${esc((c.artist || '?')[0])}</span>`}
+          <span class="cd-state">${STATUS_LABEL[c.status]}</span>
+        </div>
+        <div class="cd-body">
+          <b>${esc(c.title)}</b>
+          <span class="sub">${esc(c.artist)}</span>
+          <span class="sub dim">${esc(meta)}</span>
+        </div>
+        <div class="cd-actions">
+          <button data-next="${NEXT[c.status]}" type="button">${STATUS_LABEL[NEXT[c.status]]}</button>
+          ${c.status === 'skip' ? '' : '<button data-next="skip" class="ghost" type="button">Skip</button>'}
+        </div>
+      </div>`;
+    };
+
+    const draw = () => {
+      const needle = q.value.trim().toLowerCase();
+      const rows = items.filter((c) =>
+        (filter === 'all' || c.status === filter)
+        && (!needle || `${c.artist} ${c.title} ${c.catno ?? ''}`.toLowerCase().includes(needle)));
+      out.innerHTML = rows.length
+        ? rows.map(card).join('')
+        : `<div class="empty">nothing ${filter === 'all' ? 'on the shelf' : `marked "${STATUS_LABEL[filter] ?? filter}"`} yet</div>`;
+    };
+
+    // The view render already fetched and cached this; only re-fetch after a
+    // sync has actually changed the shelf.
+    const load = async (fresh = false) => {
+      if (fresh) delete cache['/api/cds'];
+      const d = await api('/api/cds');
+      items = d.items;
+      if (d.reconciled) notice(`${d.reconciled} disc(s) already in the library, marked ripped`);
+      draw();
+    };
+
+    filters.addEventListener('click', (e) => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      filters.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
+      filter = b.dataset.f;
+      draw();
+    });
+    q.addEventListener('input', draw);
+
+    out.addEventListener('click', async (e) => {
+      const b = e.target.closest('button[data-next]');
+      if (!b || b.disabled) return;
+      b.disabled = true;
+      const releaseId = Number(b.closest('.cd-card').dataset.id);
+      try {
+        const res = await fetch('/api/cds/status', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ releaseId, status: b.dataset.next }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `request failed (${res.status})`);
+        const index = items.findIndex((c) => c.release_id === releaseId);
+        if (index >= 0) items[index] = data.item;
+        draw();
+      } catch (err) {
+        notice(err.message, true);
+        b.disabled = false;
+      }
+    });
+
+    $('#cd-sync', el).addEventListener('click', async (e) => {
+      const button = e.currentTarget;
+      button.disabled = true;
+      button.textContent = 'Syncing...';
+      try {
+        const res = await fetch('/api/cds/sync', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `sync failed (${res.status})`);
+        notice(`${data.added} new, ${data.updated} refreshed, ${data.removed} gone, ${data.reconciled} already ripped`);
+        await load(true);
+      } catch (err) {
+        notice(err.message, true);
+      } finally {
+        button.disabled = false;
+        button.textContent = 'Sync from Discogs';
+      }
+    });
+
+    load();
+  },
   artists(el) {
     api('/api/artists').then((all) => {
       const out = $('#out', el), q = $('#q', el), fol = $('#fol', el);
@@ -1212,7 +1401,7 @@ const after = {
   },
 };
 
-const TABS = { overview: 'Overview', latest: 'Latest', artists: 'Artists', liked: 'Songs', albums: 'Albums', playlists: 'Playlists', top: 'Top', shows: 'Shows', upgrades: 'FLAC queue', plays: 'Plays' };
+const TABS = { overview: 'Overview', latest: 'Latest', artists: 'Artists', liked: 'Songs', albums: 'Albums', playlists: 'Playlists', top: 'Top', shows: 'Shows', cds: 'CDs', upgrades: 'FLAC queue', plays: 'Plays' };
 const TAB_ICONS = {
   overview: '<svg viewBox="0 0 24 24"><path d="M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4zm10 0h6v6h-6z"/></svg>',
   artists: '<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>',
@@ -1223,6 +1412,7 @@ const TAB_ICONS = {
   top: '<svg viewBox="0 0 24 24"><path d="m12 3 2.7 5.5 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/></svg>',
   shows: '<svg viewBox="0 0 24 24"><path d="M6 3v18M18 3v18M6 7h12M6 17h12"/><path d="M10 11h4v2h-4z"/></svg>',
   upgrades: '<svg viewBox="0 0 24 24"><path d="M4 17h3l2-10 3 13 3-9 2 6h3"/><path d="m16 6 2-2 2 2M18 4v6"/></svg>',
+  cds: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6"/><circle cx="12" cy="12" r="2.3"/><path d="M12 3.4a8.6 8.6 0 0 1 7.4 4.3"/></svg>',
   plays: '<svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8"/><path d="M4 3v5h5"/><path d="m10 9 5 3-5 3z"/></svg>',
 };
 const PAGE_COPY = {
@@ -1231,6 +1421,7 @@ const PAGE_COPY = {
   playlists: ['Your hand-built paths', 'Playlists'], top: ['Listening, counted honestly', 'Your top music'],
   latest: ['Freshly on disk', 'Latest downloads'],
   shows: ['Artists leaving the speakers', 'Upcoming shows'], upgrades: ['Lossless, eventually', 'FLAC upgrade queue'],
+  cds: ['The discs on the shelf', 'CD collection'],
   plays: ['The latest signals', 'Recently played'],
 };
 const nav = $('#nav');

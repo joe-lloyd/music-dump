@@ -14,6 +14,7 @@
   --accent-ink: #150611;
   --accent-soft: rgba(255, 87, 217, .12);
   --violet: #a18afc;
+  --gold: #f5c451;
   --coral: #ff785e;
   --bad: #ff8174;
   --sidebar: 226px;
@@ -1121,7 +1122,7 @@ input[type="range"] {
 
 .song-card {
   display: grid;
-  grid-template-columns: auto 44px minmax(0, 1fr) auto;
+  grid-template-columns: auto 44px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 11px;
   padding: 7px 9px;
@@ -1185,8 +1186,246 @@ input[type="range"] {
 
 @media (max-width: 760px) {
   .song-grid { grid-template-columns: 1fr; gap: 0; }
-  .song-card { grid-template-columns: auto 40px minmax(0, 1fr) auto; gap: 9px; padding-inline: 3px; }
+  .song-card { grid-template-columns: auto 40px minmax(0, 1fr) auto auto; gap: 8px; padding-inline: 3px; }
   .song-card .pic { width: 40px; height: 40px; }
+}
+
+/* --- quality and source badges ------------------------------------------
+   Tier is encoded three times over: filled bars, colour, and the literal
+   figure. Any one of the three is enough to read it, which is what keeps it
+   legible at 9px and for anyone who does not separate magenta from gold. */
+.song-badges {
+  display: flex;
+  flex: none;
+  gap: 6px;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.q-badge {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  padding: 2px 6px 2px 5px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink-3);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 8.5px;
+  letter-spacing: .02em;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.q-badge b { font-weight: 600; }
+
+.q-bars {
+  display: inline-flex;
+  gap: 1px;
+  align-items: flex-end;
+  height: 8px;
+}
+
+.q-bars i {
+  width: 2px;
+  background: currentColor;
+  border-radius: 1px;
+  opacity: .22;
+}
+
+.q-bars i.on { opacity: 1; }
+.q-bars i:nth-child(1) { height: 3px; }
+.q-bars i:nth-child(2) { height: 5px; }
+.q-bars i:nth-child(3) { height: 6.5px; }
+.q-bars i:nth-child(4) { height: 8px; }
+
+.q-low { color: var(--ink-3); }
+.q-standard { color: var(--ink-2); }
+.q-high { color: var(--ink); }
+
+.q-lossless {
+  color: var(--accent);
+  border-color: rgba(255, 87, 217, .3);
+  background: var(--accent-soft);
+}
+
+.q-hires {
+  color: var(--gold);
+  border-color: rgba(245, 196, 81, .32);
+  background: rgba(245, 196, 81, .1);
+}
+
+.s-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  color: var(--ink-3);
+  cursor: default;
+}
+
+.s-badge svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* The origin is a secondary fact, so only the two the collection is actively
+   trying to move away from get any colour. */
+.s-youtube { color: var(--coral); }
+.s-cd { color: var(--violet); }
+
+.row .song-badges { margin-left: auto; padding-left: 4px; }
+
+@media (max-width: 900px) {
+  /* Keep the icon, drop the figure: the bars still carry the ordering. */
+  .q-badge { padding: 2px 5px; }
+  .q-badge b { display: none; }
+}
+
+/* --- CD shelf ------------------------------------------------------------
+   Cards rather than rows: a disc is identified as much by its sleeve as by
+   its title, and the whole point of the page is scanning for what to rip
+   next. Ripped discs stay visible but recede. */
+.cd-tools { flex-wrap: wrap; gap: 10px 14px; align-items: center; }
+
+.cd-filters { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+
+.cd-filters button {
+  padding: 4px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: none;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+.cd-filters button:hover { border-color: var(--line-strong); color: var(--ink); }
+
+.cd-filters button.on {
+  border-color: rgba(255, 87, 217, .34);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.cd-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(178px, 1fr));
+  gap: 16px;
+}
+
+.cd-card {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--card);
+  transition: border-color .16s, background .16s;
+}
+
+.cd-card:hover { border-color: var(--line-strong); background: var(--card-hover); }
+
+/* Ripped is the finished state: still findable, no longer competing for
+   attention with the discs that still need doing. */
+.cd-ripped { opacity: .58; }
+.cd-skip { opacity: .4; }
+.cd-ripping { border-color: rgba(255, 87, 217, .3); }
+
+.cd-art {
+  position: relative;
+  aspect-ratio: 1;
+  border-radius: 9px;
+  overflow: hidden;
+  background: var(--surface-soft);
+}
+
+.cd-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.cd-art .ph {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-size: 2rem;
+  font-weight: 700;
+}
+
+.cd-state {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(10, 8, 10, .8);
+  color: var(--ink-2);
+  font-size: 8.5px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  backdrop-filter: blur(6px);
+}
+
+.cd-ripped .cd-state { color: var(--accent); }
+
+.cd-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+
+.cd-body b,
+.cd-body .sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cd-body b { font-size: 11.5px; font-weight: 630; }
+.cd-body .sub { color: var(--ink-2); font-size: 10px; }
+.cd-body .sub.dim { color: var(--ink-3); font-size: 9px; }
+
+.cd-actions { display: flex; gap: 5px; }
+
+.cd-actions button {
+  flex: 1;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: none;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.cd-actions button:hover:not(:disabled) {
+  border-color: rgba(255, 87, 217, .34);
+  color: var(--accent);
+}
+
+.cd-actions button:disabled { opacity: .5; cursor: default; }
+.cd-actions button.ghost { flex: 0 0 auto; color: var(--ink-3); }
+
+.cd-setup { text-align: left; line-height: 1.7; }
+.cd-setup p { margin: 0 0 10px; }
+.cd-setup code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--surface-soft);
+  font-size: 11px;
+}
+.cd-setup a { color: var(--accent); }
+
+@media (max-width: 720px) {
+  .cd-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; }
 }
 
 .viz-legend {
