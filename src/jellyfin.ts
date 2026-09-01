@@ -53,6 +53,8 @@ export interface PlayerStatus {
 }
 
 const INDEX_TTL_MS = 5 * 60 * 1000;
+
+type VirtualFolder = { ItemId?: string; CollectionType?: string; Locations?: string[] };
 // The upgrade worker writes paths as it sees them (/data/library/music/...);
 // Jellyfin serves the same files from its own bind (/eliot-media/music/...).
 export const LOCAL_LIBRARY_PREFIX = process.env.LOCAL_LIBRARY_PREFIX ?? '/data/library/music';
@@ -157,6 +159,8 @@ export class JellyfinBridge {
   // Set when a Jellyfin scan is asked for, so the next lookup rebuilds in the
   // background instead of throwing away an index it can still answer from.
   private stale = false;
+  // undefined = not looked up yet, null = this server has no music library.
+  private musicLibrary: string | null | undefined = undefined;
   private refreshPromise: Promise<void> | null = null;
 
   private token(): string {
@@ -455,8 +459,78 @@ export class JellyfinBridge {
     }
   }
 
+  /**
+   * The id of the one library this app has any business scanning.
+   *
+   * Discovered rather than configured, and remembered: it is the music
+   * collection whose folder is the mount we play from.
+   */
+  private async musicLibraryId(): Promise<string | null> {
+    if (this.musicLibrary !== undefined) return this.musicLibrary;
+    try {
+      const response = await this.request('/Library/VirtualFolders');
+      const folders = await response.json() as VirtualFolder[];
+      const music = folders.find((folder) => folder.CollectionType === 'music'
+        && (folder.Locations ?? []).some((at) => at.startsWith(JELLYFIN_LIBRARY_PREFIX)));
+      this.musicLibrary = music?.ItemId ?? null;
+    } catch {
+      this.musicLibrary = undefined;   // transient: worth asking again
+      return null;
+    }
+    return this.musicLibrary;
+  }
+
+  /**
+   * Tell Jellyfin that specific folders changed.
+   *
+   * This is the cheap way and it should be the usual one: Jellyfin refreshes
+   * those paths and nothing else. Answers in ~80 ms and does no scanning of
+   * its own. Works even though realtime monitoring is off for the music
+   * library - that setting is about inotify, which cannot cross NFS, and this
+   * is us reporting the change by hand instead.
+   */
+  async mediaChanged(paths: string[]): Promise<void> {
+    const updates = [...new Set(paths.map((at) => this.asJellyfinPath(at)).filter(Boolean))]
+      .map((Path_) => ({ Path: Path_, UpdateType: 'Modified' }));
+    if (!updates.length) return;
+    await this.request('/Library/Media/Updated', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ Updates: updates }),
+    });
+    this.stale = true;
+  }
+
+  private asJellyfinPath(at: string): string {
+    const normalized = String(at ?? '').replace(/\\/g, '/');
+    if (!normalized) return '';
+    if (normalized.startsWith(JELLYFIN_LIBRARY_PREFIX)) return normalized;
+    if (normalized.startsWith(LOCAL_LIBRARY_PREFIX)) {
+      return JELLYFIN_LIBRARY_PREFIX + normalized.slice(LOCAL_LIBRARY_PREFIX.length);
+    }
+    return '';                          // not ours to report
+  }
+
+  /**
+   * Scan the music library - and ONLY the music library.
+   *
+   * This used to POST /Library/Refresh, which scans every library on the
+   * server: the movie, series and video-game trees on the CIFS NAS, plus the
+   * two libraries that deliberately duplicate them (see the Jellyfin service
+   * README). One radio single landing made the Pi re-walk the whole house,
+   * and the station fetches on a two-minute timer, so it was doing that
+   * almost continuously - 32 to 85 seconds of four-core work each time.
+   *
+   * Prefer mediaChanged() when the caller knows which paths moved; this is
+   * for when it does not.
+   */
   async refreshLibrary(): Promise<void> {
-    await this.request('/Library/Refresh', { method: 'POST' });
+    const id = await this.musicLibraryId();
+    const target = id
+      ? `/Items/${encodeURIComponent(id)}/Refresh?Recursive=true&ImageRefreshMode=Default`
+        + '&MetadataRefreshMode=Default&ReplaceAllImages=false&ReplaceAllMetadata=false'
+      : '/Library/Refresh';             // no music library found: old behaviour
+    await this.request(target, { method: 'POST' });
     // Mark it, do not throw it away. Clearing indexedAt here meant the next
     // play rebuilt from cold - seventeen seconds - and it did that while the
     // scan we just asked for had Jellyfin at its busiest. Everything the old

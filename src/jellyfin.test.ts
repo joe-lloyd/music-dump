@@ -213,3 +213,72 @@ test('a miss waits for the rebuild rather than calling a track missing', { timeo
     },
   );
 });
+
+// Jellyfin cannot watch the NFS mount, so it has to be told when audio lands.
+// Telling it used to mean scanning all seven libraries on this server -
+// movies and series on the CIFS NAS included - to notice one new single.
+test('a scan is asked of the music library alone, never the whole server', async () => {
+  const asked: string[] = [];
+  const mock = http.createServer((req, res) => {
+    asked.push(`${req.method} ${req.url?.split('?')[0]}`);
+    if (req.url?.startsWith('/Library/VirtualFolders')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify([
+        { ItemId: 'movies-id', CollectionType: 'movies', Locations: ['/movies'] },
+        { ItemId: 'music-id', CollectionType: 'music', Locations: ['/eliot-media/music'] },
+      ]));
+      return;
+    }
+    res.writeHead(204).end();
+  });
+  await new Promise<void>((resolve) => mock.listen(0, '127.0.0.1', resolve));
+  const address = mock.address();
+  assert(address && typeof address === 'object');
+  process.env.JELLYFIN_URL = `http://127.0.0.1:${address.port}`;
+  process.env.JELLYFIN_API_KEY = 'fixture-key';
+  try {
+    const bridge = new JellyfinBridge();
+    await bridge.refreshLibrary();
+    assert.ok(asked.includes('POST /Items/music-id/Refresh'), `asked: ${asked.join(', ')}`);
+    assert.ok(!asked.includes('POST /Library/Refresh'), 'must not scan every library');
+    await bridge.refreshLibrary();
+    assert.equal(asked.filter((at) => at.includes('VirtualFolders')).length, 1, 'id is looked up once');
+  } finally {
+    delete process.env.JELLYFIN_URL;
+    delete process.env.JELLYFIN_API_KEY;
+    await new Promise<void>((resolve, reject) => mock.close((err) => err ? reject(err) : resolve()));
+  }
+});
+
+test('changed paths are reported as Jellyfin spells them, folders deduped', async () => {
+  let posted: { Updates: { Path: string }[] } | null = null;
+  const mock = http.createServer(async (req, res) => {
+    if (req.url?.startsWith('/Library/Media/Updated')) {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(chunk as Buffer);
+      posted = JSON.parse(Buffer.concat(chunks).toString());
+    }
+    res.writeHead(204).end();
+  });
+  await new Promise<void>((resolve) => mock.listen(0, '127.0.0.1', resolve));
+  const address = mock.address();
+  assert(address && typeof address === 'object');
+  process.env.JELLYFIN_URL = `http://127.0.0.1:${address.port}`;
+  process.env.JELLYFIN_API_KEY = 'fixture-key';
+  try {
+    await new JellyfinBridge().mediaChanged([
+      '/data/library/music/Clark/Cave Dog',          // the worker's spelling
+      '/data/library/music/Clark/Cave Dog',          // said twice, sent once
+      '/eliot-media/music/_Singles/Yppah',           // already Jellyfin's
+      '/somewhere/else/entirely',                    // not ours: dropped
+    ]);
+    assert.deepEqual(posted?.Updates.map((u) => u.Path), [
+      '/eliot-media/music/Clark/Cave Dog',
+      '/eliot-media/music/_Singles/Yppah',
+    ]);
+  } finally {
+    delete process.env.JELLYFIN_URL;
+    delete process.env.JELLYFIN_API_KEY;
+    await new Promise<void>((resolve, reject) => mock.close((err) => err ? reject(err) : resolve()));
+  }
+});

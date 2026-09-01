@@ -337,6 +337,42 @@ function mtime(at: string): number {
   }
 }
 
+/**
+ * Tell Jellyfin that audio landed - once, and only about what moved.
+ *
+ * Jellyfin cannot watch the NFS mount (inotify does not cross it), so it has
+ * to be told. Telling it used to mean POST /Library/Refresh from three
+ * unbounded call sites: a scan of ALL SEVEN libraries, movies and series and
+ * video games on the CIFS NAS included, plus the two that deliberately
+ * duplicate them. The station fetches on a two-minute timer and each finished
+ * track fired one, so the Pi was re-walking the whole house roughly half the
+ * time - 32 to 85 seconds of four-core work, to notice one new single.
+ *
+ * Now the paths themselves are reported, which Jellyfin answers in ~80 ms and
+ * acts on for those folders alone. A burst of finishing tracks collapses into
+ * one call, because three tracks landing together is one thing happening.
+ */
+const MEDIA_NOTIFY_DEBOUNCE_MS = 20_000;
+const pendingMedia = new Set<string>();
+let mediaTimer: NodeJS.Timeout | null = null;
+
+function noteMediaChanged(paths: (string | null | undefined)[]): void {
+  for (const at of paths) {
+    // The folder, not the file: Jellyfin refreshes the containing item, and
+    // a whole album arriving is one folder rather than twelve paths.
+    if (at) pendingMedia.add(path.dirname(String(at).replace(/\\/g, '/')));
+  }
+  if (!pendingMedia.size || mediaTimer) return;
+  mediaTimer = setTimeout(() => {
+    mediaTimer = null;
+    const batch = [...pendingMedia];
+    pendingMedia.clear();
+    void jellyfin.mediaChanged(batch)
+      .catch((err) => console.error('Jellyfin media update:', (err as Error).message));
+  }, MEDIA_NOTIFY_DEBOUNCE_MS);
+  mediaTimer.unref();
+}
+
 /** Every handler asks the one resolver, against the one library root. */
 const resolveArtwork = (dirAbs: string, trackFile?: string | null) =>
   resolveArtworkIn(APP_LIBRARY_PREFIX, dirAbs, trackFile);
@@ -1867,7 +1903,9 @@ const server = http.createServer(async (req, res) => {
               } satisfies BatchTrack;
             }),
           });
-          void jellyfin.refreshLibrary().catch((err) => console.error('Jellyfin refresh:', (err as Error).message));
+          // A split batch lands a folder of new audio; name it rather than
+          // asking Jellyfin to go looking for it.
+          noteMediaChanged([String(body.resultPath ?? '')]);
           json(res, 200, {
             job: publicUpgrade(result.job),
             children: result.children.map(publicUpgrade),
@@ -1885,7 +1923,7 @@ const server = http.createServer(async (req, res) => {
           resultPath: body.resultPath == null ? null : String(body.resultPath),
         });
         if (outcome === 'source_ready' || outcome === 'upgraded') {
-          void jellyfin.refreshLibrary().catch((err) => console.error('Jellyfin refresh:', (err as Error).message));
+          noteMediaChanged([body.resultPath as string, body.currentPath as string]);
         }
         json(res, 200, { job: publicUpgrade(job) });
       } catch (err) {
@@ -1919,9 +1957,7 @@ const server = http.createServer(async (req, res) => {
         // the NFS mount, so this is the moment to tell it - otherwise a
         // Soulseek or Lidarr import sits unplayable until Jellyfin's own
         // scheduled scan happens by.
-        if (written > 0) {
-          void jellyfin.refreshLibrary().catch((err) => console.error('Jellyfin refresh:', (err as Error).message));
-        }
+        if (written > 0) noteMediaChanged(rows.map((row) => row.path));
         // Only a full scan may prune; an incremental batch does not know what
         // it left out, and pruning on that would delete most of the library.
         let pruned = 0;
