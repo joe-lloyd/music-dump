@@ -194,6 +194,34 @@ function mtime(at: string): number {
  * Falls back to the directory for multi-disc releases, where the audio sits in
  * CD 01/ subfolders and the top level legitimately holds none.
  */
+const COVER_NAMES = ['cover.jpg', 'folder.jpg', 'cover.png', 'folder.png'];
+
+/**
+ * The cover for a directory, searching upward toward the library root.
+ *
+ * A multi-disc release keeps its audio in "Album/12 Vinyl 01/" while cover.jpg
+ * stays in "Album/", so looking only beside the track finds nothing. Bounded
+ * to three levels and never escapes the library root, so a stray file high up
+ * cannot become the art for half the collection.
+ */
+function findCover(startDir: string): { file: string; type: string } | null {
+  const root = path.resolve(APP_LIBRARY_PREFIX);
+  let dir = path.resolve(startDir);
+  for (let up = 0; up < 3; up += 1) {
+    if (dir !== root && !dir.startsWith(root + path.sep)) return null;
+    for (const name of COVER_NAMES) {
+      const file = path.join(dir, name);
+      try {
+        statSync(file);
+        return { file, type: name.endsWith('.png') ? 'image/png' : 'image/jpeg' };
+      } catch { /* try the next name */ }
+    }
+    if (dir === root) return null;
+    dir = path.dirname(dir);
+  }
+  return null;
+}
+
 /** Library-relative path, for the folder-art endpoint. */
 function relOf(workerPath: string): string {
   const normalized = String(workerPath ?? '').replace(/\\/g, '/');
@@ -1707,11 +1735,12 @@ const server = http.createServer(async (req, res) => {
       // of their own. For a file, the art is a sidecar named after it — a
       // folder cover would be wrong there, because one folder holds every
       // single by that artist.
+      const isFile = AUDIO_EXT.has(path.extname(dir).toLowerCase());
       const stem = path.join(path.dirname(dir), path.parse(dir).name);
-      const candidates = AUDIO_EXT.has(path.extname(dir).toLowerCase())
-        ? [`${stem}.jpg`, `${stem}.png`, path.join(path.dirname(dir), 'cover.jpg')]
-        : ['cover.jpg', 'folder.jpg', 'cover.png', 'folder.png'].map((n) => path.join(dir, n));
-      for (const file of candidates) {
+      // A single's art is its own sidecar; anything else takes the folder's
+      // cover, searched upward for multi-disc layouts.
+      const sidecars = isFile ? [`${stem}.jpg`, `${stem}.png`] : [];
+      for (const file of sidecars) {
         try {
           const body = readFileSync(file);
           res.writeHead(200, {
@@ -1720,7 +1749,13 @@ const server = http.createServer(async (req, res) => {
           });
           res.end(body);
           return;
-        } catch { /* try the next filename */ }
+        } catch { /* fall through to the folder cover */ }
+      }
+      const found = findCover(isFile ? path.dirname(dir) : dir);
+      if (found) {
+        res.writeHead(200, { 'content-type': found.type, 'cache-control': 'public, max-age=86400' });
+        res.end(readFileSync(found.file));
+        return;
       }
       // 404 rather than a placeholder: the UI already draws its own initial.
       res.writeHead(404).end();
@@ -1741,16 +1776,11 @@ const server = http.createServer(async (req, res) => {
         const tracks = provenance.albumTracks(localImage[1]);
         const folder = tracks.length ? path.dirname(relOf(tracks[0].path)) : null;
         if (folder) {
-          for (const name of ['cover.jpg', 'folder.jpg', 'cover.png', 'folder.png']) {
-            try {
-              const body = readFileSync(path.join(APP_LIBRARY_PREFIX, folder, name));
-              res.writeHead(200, {
-                'content-type': name.endsWith('.png') ? 'image/png' : 'image/jpeg',
-                'cache-control': 'public, max-age=86400',
-              });
-              res.end(body);
-              return;
-            } catch { /* try the next filename */ }
+          const found = findCover(path.join(APP_LIBRARY_PREFIX, folder));
+          if (found) {
+            res.writeHead(200, { 'content-type': found.type, 'cache-control': 'public, max-age=86400' });
+            res.end(readFileSync(found.file));
+            return;
           }
           // A folder of loose singles has no shared cover; each track carries
           // its own sidecar, so the first track's stands for the set.
