@@ -21,6 +21,7 @@ import {
   UpgradeStore, isLosslessCodec, localAlbumId, type BatchTrack, type LocalTrack,
   type SourceMode, type UpgradeJob, validWorkerToken,
 } from './upgrades.ts';
+import { resolveArtwork as resolveArtworkIn } from './artwork.ts';
 import { ListenBrainz, type RadioMode } from './listenbrainz.ts';
 import { RadioEngine, primaryArtist, type RadioEntry, type RadioSeed } from './radio.ts';
 
@@ -336,44 +337,22 @@ function mtime(at: string): number {
   }
 }
 
-/**
- * When an album's *music* landed, from the newest audio file inside it.
- *
- * Not the directory's mtime, which is what this used to read. A directory is
- * touched by anything written into it, so the artwork backfill writing
- * cover.jpg into 700 folders made the entire library look like it had arrived
- * in the past hour. Any sidecar — .nfo, .lrc, a re-downloaded cover — would do
- * the same. Only the audio answers the question being asked.
- *
- * Falls back to the directory for multi-disc releases, where the audio sits in
- * CD 01/ subfolders and the top level legitimately holds none.
- */
-const COVER_NAMES = ['cover.jpg', 'folder.jpg', 'cover.png', 'folder.png'];
+/** Every handler asks the one resolver, against the one library root. */
+const resolveArtwork = (dirAbs: string, trackFile?: string | null) =>
+  resolveArtworkIn(APP_LIBRARY_PREFIX, dirAbs, trackFile);
 
-/**
- * The cover for a directory, searching upward toward the library root.
- *
- * A multi-disc release keeps its audio in "Album/12 Vinyl 01/" while cover.jpg
- * stays in "Album/", so looking only beside the track finds nothing. Bounded
- * to three levels and never escapes the library root, so a stray file high up
- * cannot become the art for half the collection.
- */
-function findCover(startDir: string): { file: string; type: string } | null {
-  const root = path.resolve(APP_LIBRARY_PREFIX);
-  let dir = path.resolve(startDir);
-  for (let up = 0; up < 3; up += 1) {
-    if (dir !== root && !dir.startsWith(root + path.sep)) return null;
-    for (const name of COVER_NAMES) {
-      const file = path.join(dir, name);
-      try {
-        statSync(file);
-        return { file, type: name.endsWith('.png') ? 'image/png' : 'image/jpeg' };
-      } catch { /* try the next name */ }
-    }
-    if (dir === root) return null;
-    dir = path.dirname(dir);
+/** Answers with the artwork, or reports that the caller should 404. */
+function sendArtwork(res: http.ServerResponse, found: { file: string; type: string } | null): boolean {
+  if (!found) return false;
+  let body: Buffer;
+  try {
+    body = readFileSync(found.file);
+  } catch {
+    return false;                     // vanished between the stat and the read
   }
-  return null;
+  res.writeHead(200, { 'content-type': found.type, 'cache-control': 'public, max-age=86400' });
+  res.end(body);
+  return true;
 }
 
 /**
@@ -412,6 +391,18 @@ function albumTitleOf(folderName: string): string {
   return String(folderName ?? '').replace(/\s*[([].*$/, '').trim();
 }
 
+/**
+ * When an album's *music* landed, from the newest audio file inside it.
+ *
+ * Not the directory's mtime, which is what this used to read. A directory is
+ * touched by anything written into it, so the artwork backfill writing
+ * cover.jpg into 700 folders made the entire library look like it had arrived
+ * in the past hour. Any sidecar — .nfo, .lrc, a re-downloaded cover — would do
+ * the same. Only the audio answers the question being asked.
+ *
+ * Falls back to the directory for multi-disc releases, where the audio sits in
+ * CD 01/ subfolders and the top level legitimately holds none.
+ */
 function albumLanded(dir: string): number {
   let newest = 0;
   try {
@@ -2363,49 +2354,10 @@ const server = http.createServer(async (req, res) => {
       // of their own. For a file, the art is a sidecar named after it — a
       // folder cover would be wrong there, because one folder holds every
       // single by that artist.
+      // A rel naming the audio asks about ONE track; a rel naming a folder
+      // asks about the record it holds.
       const isFile = AUDIO_EXT.has(path.extname(dir).toLowerCase());
-      const stem = path.join(path.dirname(dir), path.parse(dir).name);
-      // A single's art is its own sidecar; anything else takes the folder's
-      // cover, searched upward for multi-disc layouts.
-      const sidecars = isFile ? [`${stem}.jpg`, `${stem}.png`] : [];
-      for (const file of sidecars) {
-        try {
-          const body = readFileSync(file);
-          res.writeHead(200, {
-            'content-type': file.endsWith('.png') ? 'image/png' : 'image/jpeg',
-            'cache-control': 'public, max-age=86400',
-          });
-          res.end(body);
-          return;
-        } catch { /* fall through to the folder cover */ }
-      }
-      const found = findCover(isFile ? path.dirname(dir) : dir);
-      if (found) {
-        res.writeHead(200, { 'content-type': found.type, 'cache-control': 'public, max-age=86400' });
-        res.end(readFileSync(found.file));
-        return;
-      }
-      // Last resort: the newest sidecar in the folder. A singles folder has
-      // no cover.jpg on purpose - each single wears its own art - so a card
-      // that stands for the whole folder (the Albums grid, an album hero)
-      // borrows the freshest sleeve rather than showing nothing. Asked for by
-      // one single whose OWN art is missing, a sibling's sleeve is still a
-      // better answer than a blank: 10 of 62 collections keyed on exactly
-      // such a file. Ordinary album folders almost always have cover.jpg and
-      // never reach this.
-      const sidecarDir = isFile ? path.dirname(dir) : dir;
-      try {
-        const newest = readdirSync(sidecarDir)
-          .filter((file) => file.toLowerCase().endsWith('.jpg') && !file.startsWith('.'))
-          .map((file) => path.join(sidecarDir, file))
-          .map((file) => ({ file, at: mtime(file) ?? 0 }))
-          .sort((a, b) => b.at - a.at)[0];
-        if (newest) {
-          res.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'public, max-age=86400' });
-          res.end(readFileSync(newest.file));
-          return;
-        }
-      } catch { /* unreadable while eliot sleeps */ }
+      if (sendArtwork(res, resolveArtwork(isFile ? path.dirname(dir) : dir, isFile ? dir : null))) return;
       // 404 rather than a placeholder: the UI already draws its own initial.
       res.writeHead(404).end();
       return;
@@ -2422,55 +2374,24 @@ const server = http.createServer(async (req, res) => {
       // than left to the <img> onerror fallback, so the first request already
       // resolves and every surface behaves the same.
       if (localImage[1].startsWith(LIB_ALBUM_PREFIX)) {
+        // A library album is a whole folder, so no one track speaks for it.
         const tracks = provenance.albumTracks(localImage[1]);
         const folder = tracks.length ? path.dirname(relOf(tracks[0].path)) : null;
-        if (folder) {
-          const found = findCover(path.join(APP_LIBRARY_PREFIX, folder));
-          if (found) {
-            res.writeHead(200, { 'content-type': found.type, 'cache-control': 'public, max-age=86400' });
-            res.end(readFileSync(found.file));
-            return;
-          }
-          // A folder of loose singles has no shared cover; each track wears
-          // its own sidecar. The newest one stands for the set - NOT only the
-          // first track's, which was the same trap the Albums grid fell into:
-          // key on the one single whose art is missing and the whole
-          // collection goes blank while its siblings hold sleeves.
-          try {
-            const dirAbs = path.join(APP_LIBRARY_PREFIX, folder);
-            const newest = readdirSync(dirAbs)
-              .filter((file) => file.toLowerCase().endsWith('.jpg') && !file.startsWith('.'))
-              .map((file) => path.join(dirAbs, file))
-              .map((file) => ({ file, at: mtime(file) }))
-              .sort((a, b) => b.at - a.at)[0];
-            if (newest) {
-              res.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'public, max-age=86400' });
-              res.end(readFileSync(newest.file));
-              return;
-            }
-          } catch { /* unreadable while eliot sleeps */ }
-        }
+        if (folder && sendArtwork(res, resolveArtwork(path.join(APP_LIBRARY_PREFIX, folder)))) return;
         res.writeHead(404).end();
         return;
       }
       const track = upgrades.localTracks().find((row) => row.album_id === localImage[1]);
       if (track) {
         // The worker records its own mount path; this container sees the
-        // same tree under APP_LIBRARY_PREFIX.
-        const dir = path.dirname(track.path.replace(/\\/g, '/'));
-        if (dir.startsWith(LOCAL_LIBRARY_PREFIX)) {
-          const local = path.join(APP_LIBRARY_PREFIX, dir.slice(LOCAL_LIBRARY_PREFIX.length));
-          for (const name of ['cover.jpg', 'folder.jpg', 'cover.png', 'folder.png']) {
-            try {
-              const body = readFileSync(path.join(local, name));
-              res.writeHead(200, {
-                'content-type': name.endsWith('.png') ? 'image/png' : 'image/jpeg',
-                'cache-control': 'public, max-age=86400',
-              });
-              res.end(body);
-              return;
-            } catch { /* try the next filename */ }
-          }
+        // same tree under APP_LIBRARY_PREFIX. A locally imported album IS one
+        // track, so it is asked for BY FILE: a radio single living in
+        // _Singles/<artist>/ wears its own "<track name>.jpg" sidecar, which
+        // the old four-cover-names loop could never find.
+        const worker = track.path.replace(/\\/g, '/');
+        if (worker.startsWith(LOCAL_LIBRARY_PREFIX)) {
+          const file = path.join(APP_LIBRARY_PREFIX, worker.slice(LOCAL_LIBRARY_PREFIX.length));
+          if (sendArtwork(res, resolveArtwork(path.dirname(file), file))) return;
         }
         try {
           const match = await jellyfin.matchPath(track.path);
