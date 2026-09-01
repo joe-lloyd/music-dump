@@ -154,6 +154,9 @@ export class JellyfinBridge {
   private relPathsAt = 0;
   private itemCount = 0;
   private indexedAt = 0;
+  // Set when a Jellyfin scan is asked for, so the next lookup rebuilds in the
+  // background instead of throwing away an index it can still answer from.
+  private stale = false;
   private refreshPromise: Promise<void> | null = null;
 
   private token(): string {
@@ -187,43 +190,66 @@ export class JellyfinBridge {
     return probe(this.sourceHost, this.sourcePort);
   }
 
+  /**
+   * Bring the index up to date - without ever making playback wait for it.
+   *
+   * Rebuilding means asking Jellyfin for all ~9,500 audio items with their
+   * metadata, and on the Pi that takes about SEVENTEEN SECONDS. This used to
+   * sit directly in front of playback: match() and matchPath() await it, and
+   * it rebuilds once the index passes five minutes old, so the first track
+   * played after any five-minute gap stalled for seventeen seconds before a
+   * byte of audio moved. Picking a random song or a new album - exactly when
+   * you have not played anything for a while - hit it almost every time.
+   *
+   * A stale index is still a good index: the library gains a track now and
+   * then, it does not reshuffle. So the rebuild now runs behind whatever we
+   * already hold, and only a caller with nothing at all to answer from waits.
+   */
   async refresh(force = false): Promise<void> {
     if (!this.configured()) throw new Error('Jellyfin playback is not configured');
-    if (!force && this.indexedAt && Date.now() - this.indexedAt < INDEX_TTL_MS) return;
-    if (this.refreshPromise) return this.refreshPromise;
+    const usable = this.indexedAt && !this.stale && Date.now() - this.indexedAt < INDEX_TTL_MS;
+    if (!force && usable) return;
+    if (!this.refreshPromise) {
+      this.refreshPromise = this.rebuild().finally(() => { this.refreshPromise = null; });
+    }
+    // Cold, or the caller insists on current data: this one has to wait.
+    if (force || !this.indexedAt) return this.refreshPromise;
+    // Otherwise answer from what we have. The catch marks the promise handled
+    // so a background failure cannot take the process down; the index we are
+    // still serving is the fallback.
+    this.refreshPromise.catch(() => { /* keep serving the index we have */ });
+  }
 
-    this.refreshPromise = (async () => {
-      const params = new URLSearchParams({
-        recursive: 'true',
-        includeItemTypes: 'Audio',
-        fields: 'Album,AlbumArtists,AlbumId,Artists,RunTimeTicks,IndexNumber,ParentIndexNumber,Container,Path',
-        enableTotalRecordCount: 'true',
-        limit: '100000',
-      });
-      if (this.userId) params.set('userId', this.userId);
-      // The full audio dump takes well over the default 12 s while a
-      // library scan has the Pi busy; a cold container must still manage
-      // to build its first index.
-      const response = await this.request(`/Items?${params}`, { signal: AbortSignal.timeout(90_000) });
-      const data = await response.json() as JellyfinItemsResponse;
-      const next = new Map<string, JellyfinAudioItem[]>();
-      const nextPaths = new Map<string, JellyfinAudioItem>();
-      for (const raw of data.Items ?? []) {
-        if (!raw.Id || !raw.Name) continue;
-        if (raw.Path) nextPaths.set(raw.Path.replace(/\\/g, '/'), raw);
-        const item = deriveFromFilename(raw);
-        const key = normalizeMusicText(item.Name);
-        const bucket = next.get(key) ?? [];
-        bucket.push(item);
-        next.set(key, bucket);
-      }
-      this.byName = next;
-      this.byPath = nextPaths;
-      this.itemCount = data.TotalRecordCount ?? data.Items?.length ?? 0;
-      this.indexedAt = Date.now();
-    })().finally(() => { this.refreshPromise = null; });
-
-    return this.refreshPromise;
+  private async rebuild(): Promise<void> {
+    const params = new URLSearchParams({
+      recursive: 'true',
+      includeItemTypes: 'Audio',
+      fields: 'Album,AlbumArtists,AlbumId,Artists,RunTimeTicks,IndexNumber,ParentIndexNumber,Container,Path',
+      enableTotalRecordCount: 'true',
+      limit: '100000',
+    });
+    if (this.userId) params.set('userId', this.userId);
+    // The full audio dump takes well over the default 12 s while a
+    // library scan has the Pi busy; a cold container must still manage
+    // to build its first index.
+    const response = await this.request(`/Items?${params}`, { signal: AbortSignal.timeout(90_000) });
+    const data = await response.json() as JellyfinItemsResponse;
+    const next = new Map<string, JellyfinAudioItem[]>();
+    const nextPaths = new Map<string, JellyfinAudioItem>();
+    for (const raw of data.Items ?? []) {
+      if (!raw.Id || !raw.Name) continue;
+      if (raw.Path) nextPaths.set(raw.Path.replace(/\\/g, '/'), raw);
+      const item = deriveFromFilename(raw);
+      const key = normalizeMusicText(item.Name);
+      const bucket = next.get(key) ?? [];
+      bucket.push(item);
+      next.set(key, bucket);
+    }
+    this.byName = next;
+    this.byPath = nextPaths;
+    this.itemCount = data.TotalRecordCount ?? data.Items?.length ?? 0;
+    this.indexedAt = Date.now();
+    this.stale = false;
   }
 
   /**
@@ -295,13 +321,29 @@ export class JellyfinBridge {
     return null;
   }
 
+  /**
+   * A hit against a stale index is a hit; a MISS might only mean the file
+   * landed after that index was built. So a miss - and only a miss - waits
+   * for the rebuild already running rather than calling a track we do have
+   * missing. Playing something the library holds never pays for this.
+   */
+  private async settled<T>(found: T | null, again: () => T | null): Promise<T | null> {
+    if (found || !this.refreshPromise) return found;
+    try {
+      await this.refreshPromise;
+    } catch {
+      return null;                   // the rebuild failed; the miss stands
+    }
+    return again();
+  }
+
   async matchPath(workerPath: string): Promise<PlayerMatch | null> {
     try {
       await this.refresh();
     } catch (err) {
       if (!this.indexedAt) throw err;
     }
-    return this.matchPathLoaded(workerPath);
+    return this.settled(this.matchPathLoaded(workerPath), () => this.matchPathLoaded(workerPath));
   }
 
   async match(track: TasteTrack): Promise<PlayerMatch | null> {
@@ -310,7 +352,7 @@ export class JellyfinBridge {
     } catch (err) {
       if (!this.indexedAt) throw err;
     }
-    return this.matchLoaded(track);
+    return this.settled(this.matchLoaded(track), () => this.matchLoaded(track));
   }
 
   async status(force = false): Promise<PlayerStatus> {
@@ -415,8 +457,11 @@ export class JellyfinBridge {
 
   async refreshLibrary(): Promise<void> {
     await this.request('/Library/Refresh', { method: 'POST' });
-    // Do not serve the old index while Jellyfin is discovering the replacement.
-    this.indexedAt = 0;
+    // Mark it, do not throw it away. Clearing indexedAt here meant the next
+    // play rebuilt from cold - seventeen seconds - and it did that while the
+    // scan we just asked for had Jellyfin at its busiest. Everything the old
+    // index knew about is still exactly where it was.
+    this.stale = true;
   }
 
   async wake(): Promise<void> {

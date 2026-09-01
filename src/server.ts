@@ -2461,3 +2461,9 @@ if (listenbrainz.enabled) {
 }
 
 server.listen(PORT, () => console.log(`taste-db ui on :${PORT}, db: ${DB_FILE}`));
+
+// Build the Jellyfin index now rather than on someone's first press of play.
+// A cold one costs ~17s; paying it at boot means no listener ever does. It
+// fails harmlessly while eliot is asleep - status() reports that honestly and
+// the next lookup tries again.
+void jellyfin.refresh(true).catch(() => { /* archive offline: nothing to index yet */ });

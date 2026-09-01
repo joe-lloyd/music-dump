@@ -131,3 +131,85 @@ test('indexes Jellyfin audio, matches safely, and forwards range requests', asyn
     await new Promise<void>((resolve, reject) => mock.close((err) => err ? reject(err) : resolve()));
   }
 });
+
+// Rebuilding the index means asking Jellyfin for every audio item it holds,
+// which on the Pi takes about seventeen seconds. It used to sit directly in
+// front of playback, so the first track played after any five-minute gap
+// stalled for that long. These pin the behaviour that fixed it.
+//
+// Deterministic rather than timed: the second /Items request HANGS until the
+// test releases it, so "did not wait for the rebuild" is the difference
+// between passing and hanging, not a stopwatch reading.
+async function withSlowIndex(
+  items: (round: number) => unknown[],
+  body: (bridge: JellyfinBridge, release: () => void) => Promise<void>,
+): Promise<void> {
+  let round = 0;
+  // The gate exists before the server does, so releasing it early is safe -
+  // awaiting an already-open gate just continues.
+  let open = () => { /* replaced below */ };
+  const gate = new Promise<void>((resolve) => { open = resolve; });
+  const mock = http.createServer(async (req, res) => {
+    if (req.url?.startsWith('/Items?')) {
+      round += 1;
+      if (round > 1) await gate;      // every rebuild waits to be let go
+      const payload = items(round);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ TotalRecordCount: payload.length, Items: payload }));
+      return;
+    }
+    if (req.url?.startsWith('/Library/Refresh')) {
+      res.writeHead(204).end();
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  await new Promise<void>((resolve) => mock.listen(0, '127.0.0.1', resolve));
+  const address = mock.address();
+  assert(address && typeof address === 'object');
+  process.env.JELLYFIN_URL = `http://127.0.0.1:${address.port}`;
+  process.env.JELLYFIN_API_KEY = 'fixture-key';
+  try {
+    await body(new JellyfinBridge(), open);
+  } finally {
+    open();                            // never leave a request hanging
+    delete process.env.JELLYFIN_URL;
+    delete process.env.JELLYFIN_API_KEY;
+    await new Promise<void>((resolve, reject) => mock.close((err) => err ? reject(err) : resolve()));
+  }
+}
+
+const indexed = (id: string, name: string) => ({
+  Id: id, Name: name, Album: track.album, Artists: [track.artists],
+  RunTimeTicks: 2_520_000_000, IndexNumber: 3, ParentIndexNumber: 1,
+  Container: 'flac', Path: `/eliot-media/music/Local Signals/${id}.flac`,
+});
+
+test('a stale index answers immediately while it rebuilds behind you', { timeout: 5_000 }, async () => {
+  await withSlowIndex(() => [indexed('right', track.name)], async (bridge, release) => {
+    assert.equal((await bridge.status()).state, 'ready');
+    // A Jellyfin scan used to throw the index away; now it only marks it.
+    await bridge.refreshLibrary();
+    // This must NOT wait for the rebuild - which is hanging - to answer.
+    const match = await bridge.match(track);
+    assert.equal(match?.itemId, 'right', 'a known track must resolve from the index we already hold');
+    release();
+  });
+});
+
+test('a miss waits for the rebuild rather than calling a track missing', { timeout: 5_000 }, async () => {
+  const fresh: TasteTrack = { ...track, name: 'Arrived After The Index' };
+  await withSlowIndex(
+    (round) => round === 1
+      ? [indexed('right', track.name)]
+      : [indexed('right', track.name), indexed('newcomer', fresh.name)],
+    async (bridge, release) => {
+      assert.equal((await bridge.status()).state, 'ready');
+      await bridge.refreshLibrary();
+      const pending = bridge.match(fresh);      // misses the stale index
+      release();                                 // let the rebuild land
+      assert.equal((await pending)?.itemId, 'newcomer',
+        'a file that landed after the index was built must still resolve');
+    },
+  );
+});

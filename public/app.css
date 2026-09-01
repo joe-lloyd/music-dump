@@ -2434,7 +2434,11 @@ input[type="range"] {
   .sidebar-foot { display: grid; }
   .content-shell { padding: 18px 16px 54px; }
   .page-kicker { display: none; }
-  .page-back { min-height: 36px; margin-bottom: 8px; padding: 0 15px 0 11px; }
+  /* The bar's copy is the one a phone uses: it stays put while you scroll,
+     which is the whole point on a page as long as a discography. Pushed to
+     the right of the burger and the brand. */
+  .page-head .page-back { display: none; }
+  .mobile-bar .page-back { min-height: 34px; margin: 0 0 0 auto; padding: 0 13px 0 9px; }
   .page-head { align-items: center; min-height: 0; margin-bottom: 12px; padding-bottom: 10px; }
   .page-head h1 { font-size: 20px; }
   .overview-hero { grid-template-columns: 1fr; min-height: 0; padding: 28px; }

@@ -128,6 +128,13 @@
     <span class="brand-mark" aria-hidden="true"><span></span></span>
     <b>Music Taste</b>
   </a>
+  <!-- The phone's back button: in the bar because the bar is what stays put
+       when you scroll. The page-head copy below serves desktop, where there
+       is no bar to put it in. Both carry data-back and the router shows and
+       hides them together. -->
+  <button class="page-back top-back" id="top-back" type="button" data-back hidden>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg><span>Back</span>
+  </button>
 </header>
 <div class="nav-backdrop" id="nav-backdrop" hidden></div>
 <div class="app-shell">
@@ -150,8 +157,8 @@
   <section class="content-shell">
     <header class="page-head">
       <div>
-        <!-- Sub pages only; the router shows and hides it. -->
-        <button class="page-back" id="page-back" type="button" hidden>
+        <!-- Desktop's copy; the phone uses the one in the top bar. -->
+        <button class="page-back" id="page-back" type="button" data-back hidden>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg>
           <span>Back</span>
         </button>
@@ -1965,7 +1972,9 @@ const SKELETON = `<div class="skeleton">${'<div class="skeleton-row"><span></spa
    there is nothing of ours behind us, so the button goes to the list the page
    belongs to rather than out of the app. */
 const PARENT_OF = { artist: 'artists', album: 'albums', playlist: 'playlists', station: 'radio' };
-const backButton = $('#page-back');
+// Two buttons, one state: the phone's lives in the sticky top bar, desktop's
+// in the page head. Only one of them is ever on screen.
+const backButtons = [...document.querySelectorAll('[data-back]')];
 let navDepth = 0;
 
 if (typeof history.state?.depth === 'number') navDepth = history.state.depth;
@@ -1981,15 +1990,19 @@ addEventListener('hashchange', () => {
 // null for one of the tabs, which are destinations rather than steps.
 function setBack(kind) {
   const parent = kind ? PARENT_OF[kind] : null;
-  backButton.hidden = !parent;
-  if (!parent) return;
-  backButton.dataset.parent = parent;
-  backButton.setAttribute('aria-label', navDepth > 0 ? 'Back' : `Back to ${TABS[parent]}`);
+  for (const button of backButtons) {
+    button.hidden = !parent;
+    if (!parent) continue;
+    button.dataset.parent = parent;
+    button.setAttribute('aria-label', navDepth > 0 ? 'Back' : `Back to ${TABS[parent]}`);
+  }
 }
 
-backButton.addEventListener('click', () => {
+document.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-back]');
+  if (!button) return;
   if (navDepth > 0) history.back();
-  else location.hash = backButton.dataset.parent || 'overview';
+  else location.hash = button.dataset.parent || 'overview';
 });
 
 let showGen = 0;
