@@ -575,7 +575,7 @@ const gigCard = (e, i = 0) => {
 // art, name, artist, year (plus type when it isn't a plain album), then the
 // quality and source badges. `when` overlays a timestamp pill on the art,
 // which is how Latest keeps its download time.
-const albumCell = (a, when = '') => {
+const albumCell = (a, when = '', extraClass = '') => {
   const id = a.id ?? a.album_id;
   const href = id ? `#album/${id}` : null;
   const bareName = String(a.name ?? '').replace(/\s*[(\[]\d{4}[)\]].*$/, '').replace(/\s*\[[^\]]*\]\s*$/, '');
@@ -584,7 +584,7 @@ const albumCell = (a, when = '') => {
     : (a.album_type === 'single' || a.kind === 'single') ? 'single' : '';
   const line = [year, type, a.is_saved ? 'saved ✓' : ''].filter(Boolean).join(' · ');
   return `
-  <div class="al-card">
+  <div class="al-card${extraClass ? ` ${extraClass}` : ''}">
     ${href ? `<a class="al-art" href="${href}">` : '<span class="al-art">'}${pic('albums', id, a.image_url, bareName, a.downloaded ? dlBadge : '')}${when ? `<span class="al-when">${esc(when)}</span>` : ''}${href ? '</a>' : '</span>'}
     <div class="al-body">
       <b>${href ? `<a href="${href}">${esc(bareName)}</a>` : esc(bareName)}</b>
@@ -829,8 +829,18 @@ const views = {
   async latest() {
     const rows = await api('/api/latest');
     if (!rows.length) return '<div class="empty">nothing downloaded yet — or the archive is asleep</div>';
-    return `<p class="note">Newest arrivals in the local library, by when the files landed.</p>
-      <div class="al-grid">${rows.map((row) => albumCell(row, ago(row.added_at))).join('')}</div>`;
+    // playable === false means the files are on disk but Jellyfin has not
+    // ingested them yet: show the card dimmed and say so, instead of letting
+    // a finished-looking card fail with an error on play. null means the
+    // index is unavailable (eliot asleep), which is unknown - not broken.
+    const pending = rows.filter((r) => r.playable === false).length;
+    return `<p class="note">Newest arrivals in the local library, by when the files landed.${
+        pending ? ` ${pending} still syncing into the player — they go live within a few minutes.` : ''}</p>
+      <div class="al-grid">${rows.map((row) => albumCell(
+        row,
+        row.playable === false ? `syncing · ${ago(row.added_at)}` : ago(row.added_at),
+        row.playable === false ? 'pending' : '',
+      )).join('')}</div>`;
   },
 
   async shows() {

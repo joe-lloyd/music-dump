@@ -1367,6 +1367,17 @@ input[type="range"] {
 
 .al-card.gone { opacity: .55; }
 
+/* On disk but not yet ingested by the player backend: visibly not-ready,
+   still identifiable, and it rights itself when the library scan lands. */
+.al-card.pending { opacity: .55; }
+.al-card.pending .al-when { color: var(--accent); animation: pendpulse 1.6s ease-in-out infinite alternate; }
+
+@keyframes pendpulse { from { opacity: .7; } to { opacity: 1; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .al-card.pending .al-when { animation: none; }
+}
+
 .al-art {
   position: relative;
   display: block;

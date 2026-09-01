@@ -150,6 +150,8 @@ export class JellyfinBridge {
   private readonly wakeUrl = process.env.ELIOT_WAKE_URL ?? '';
   private byName = new Map<string, JellyfinAudioItem[]>();
   private byPath = new Map<string, JellyfinAudioItem>();
+  private relPaths: Set<string> | null = null;
+  private relPathsAt = 0;
   private itemCount = 0;
   private indexedAt = 0;
   private refreshPromise: Promise<void> | null = null;
@@ -222,6 +224,40 @@ export class JellyfinBridge {
     })().finally(() => { this.refreshPromise = null; });
 
     return this.refreshPromise;
+  }
+
+  /**
+   * Everything the index can actually play, as paths relative to the library
+   * root: each audio file, and every directory above it.
+   *
+   * This exists so the Latest feed can tell "on disk" apart from "playable".
+   * The provenance scanner reads the disk directly and badges a file within
+   * minutes of it landing; Jellyfin only serves what its own library scan has
+   * ingested. Between those two moments a card looks finished but play fails,
+   * which is the lie this lookup lets the UI stop telling.
+   *
+   * Returns null while no index is loaded - "unknown" must not be presented
+   * as "not playable".
+   */
+  indexedRelPaths(): Set<string> | null {
+    if (!this.indexedAt) return null;
+    if (this.relPathsAt === this.indexedAt && this.relPaths) return this.relPaths;
+    const rels = new Set<string>();
+    for (const full of this.byPath.keys()) {
+      for (const prefix of [JELLYFIN_LIBRARY_PREFIX, LOCAL_LIBRARY_PREFIX]) {
+        if (!full.startsWith(prefix + '/')) continue;
+        let rel = full.slice(prefix.length + 1);
+        rels.add(rel);
+        // Every ancestor directory too, so an album folder answers directly.
+        while (rel.includes('/')) {
+          rel = rel.slice(0, rel.lastIndexOf('/'));
+          rels.add(rel);
+        }
+      }
+    }
+    this.relPaths = rels;
+    this.relPathsAt = this.indexedAt;
+    return rels;
   }
 
   matchLoaded(track: TasteTrack): PlayerMatch | null {

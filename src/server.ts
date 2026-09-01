@@ -40,6 +40,8 @@ const provenance = new ProvenanceStore();
 const shelf = new ShelfStore();
 const discogs = new DiscogsClient();
 const UPGRADE_WORKER_TOKEN = process.env.UPGRADE_WORKER_TOKEN ?? '';
+// Last time a failed resolve triggered a Jellyfin rescan; see /api/player/resolve.
+let lastMissRefresh = 0;
 const SOURCE_HOSTS = new Set([
   'open.spotify.com', 'spotify.link',
   'youtube.com', 'www.youtube.com', 'music.youtube.com', 'youtu.be', 'www.youtu.be',
@@ -160,7 +162,11 @@ function latestDownloads(limit = 60): Record<string, unknown>[] {
   const rows: Record<string, unknown>[] = [];
   const add = (name: string, artist: string, at: string, kind: string, albumId: string | null) => {
     const when = mtime(at);
-    if (when) rows.push({ name, artists: artist, added_at: new Date(when).toISOString(), kind, album_id: albumId });
+    if (!when) return;
+    // Library-relative path, kept so /api/latest can ask Jellyfin's index
+    // whether this is actually servable yet rather than merely on disk.
+    const rel = path.relative(APP_LIBRARY_PREFIX, at).split(path.sep).join('/');
+    rows.push({ name, artists: artist, added_at: new Date(when).toISOString(), kind, album_id: albumId, rel });
   };
 
   for (const top of dirs(APP_LIBRARY_PREFIX)) {
@@ -467,10 +473,18 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
     }
     const match = await resolveMatch(track);
     if (!match) {
+      // The most common reason a known track will not resolve is that the
+      // file landed after Jellyfin's last scan. Kick one - rate limited so a
+      // page full of genuinely-missing tracks cannot hammer the server - and
+      // the retry a minute later succeeds instead of failing forever.
+      if (Date.now() - lastMissRefresh > 5 * 60 * 1000) {
+        lastMissRefresh = Date.now();
+        void jellyfin.refreshLibrary().catch((err) => console.error('Jellyfin refresh:', (err as Error).message));
+      }
       return {
         available: false,
         reason: 'not-matched',
-        detail: 'No local file for this track — its album may not be downloaded yet',
+        detail: 'No local file for this track — its album may not be downloaded yet. The library is re-syncing; try again in a minute.',
         track,
       };
     }
@@ -1068,7 +1082,18 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
   },
 
   // Newest finished downloads, by what is actually on disk.
-  '/api/latest': (params) => latestDownloads(Math.min(Number(params.get('limit') ?? 60), 200)),
+  '/api/latest': (params) => {
+    const rows = latestDownloads(Math.min(Number(params.get('limit') ?? 60), 200));
+    // Checked fresh on every request: a card flips from "syncing" to playable
+    // the moment Jellyfin's scan lands, without waiting out the disk cache.
+    const indexed = jellyfin.indexedRelPaths();
+    return rows.map(({ rel, ...row }) => ({
+      ...row,
+      // null = index unavailable (eliot asleep, first load): unknown, and
+      // unknown must not be shown as broken.
+      playable: indexed ? indexed.has(String(rel ?? '')) : null,
+    }));
+  },
 
   // How the library breaks down by origin and by fidelity - the numbers behind
   // the badges, for the Overview page.
@@ -1332,6 +1357,13 @@ const server = http.createServer(async (req, res) => {
         const body = await readJson(req, 4_000_000);
         const rows = Array.isArray(body.files) ? body.files as ScanInput[] : [];
         const written = provenance.upsert(rows);
+        // New rows mean new or changed audio on disk. Jellyfin does not watch
+        // the NFS mount, so this is the moment to tell it - otherwise a
+        // Soulseek or Lidarr import sits unplayable until Jellyfin's own
+        // scheduled scan happens by.
+        if (written > 0) {
+          void jellyfin.refreshLibrary().catch((err) => console.error('Jellyfin refresh:', (err as Error).message));
+        }
         // Only a full scan may prune; an incremental batch does not know what
         // it left out, and pruning on that would delete most of the library.
         let pruned = 0;
