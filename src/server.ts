@@ -12,7 +12,7 @@ import { JellyfinBridge, LOCAL_LIBRARY_PREFIX, type TasteTrack } from './jellyfi
 import { LyricsService } from './lyrics.ts';
 import { resolveViaSearch } from './musicbrainz.ts';
 import { APP_PLAYS_FILE, PlaysStore } from './plays.ts';
-import { ProvenanceStore, provenanceKey, type ScanInput } from './provenance.ts';
+import { ProvenanceStore, albumMatchKey, provenanceKey, type ScanInput } from './provenance.ts';
 import {
   UpgradeStore, localAlbumId, type BatchTrack, type LocalTrack, type SourceMode,
   type UpgradeJob, validWorkerToken,
@@ -348,13 +348,20 @@ function decorateBadges(value: unknown, depth = 0): unknown {
   if (Array.isArray(value)) {
     const badges = provenance.badges();
     if (!badges.size) return value;
+    const albums = provenance.albumBadges();
     for (const entry of value) {
       if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
       const row = entry as Record<string, unknown>;
       if (typeof row.name !== 'string') continue;
       const artist = row.artists ?? row.artist_name ?? row.artist;
       if (typeof artist !== 'string') continue;
-      const badge = badges.get(provenanceKey(artist, row.name));
+      // A row with no duration and no album of its own is a release, not a
+      // track (the Albums grid and Latest downloads). Matching those against
+      // the track index would be meaningless, so they get the album summary.
+      const isRelease = row.duration_ms == null && row.album == null;
+      const badge = isRelease
+        ? albums.get(albumMatchKey(artist, row.name))
+        : badges.get(provenanceKey(artist, row.name));
       if (badge) {
         row.quality = badge.tier;
         row.quality_label = badge.quality;

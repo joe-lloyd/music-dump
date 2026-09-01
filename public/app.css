@@ -1283,6 +1283,13 @@ input[type="range"] {
 
 .row .song-badges { margin-left: auto; padding-left: 4px; }
 
+/* In an album cell the badges are a caption, not a right-hand column. */
+.cell .song-badges { justify-content: flex-start; margin-top: 5px; }
+
+/* songCard keeps an empty badge div so the grid columns stay aligned;
+   everywhere else it must not leave a gap. */
+.cell .song-badges:empty { margin-top: 0; }
+
 @media (max-width: 900px) {
   /* Keep the icon, drop the figure: the bars still carry the ordering. */
   .q-badge { padding: 2px 5px; }

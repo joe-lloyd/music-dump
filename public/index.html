@@ -576,6 +576,7 @@ const albumCell = (a) => `
     <div class="sub">${esc(a.artists ?? '')}</div>
     <div class="sub">${(a.release_date ?? '').slice(0, 4)}${a.album_group && a.album_group !== 'album' ? ' · ' + esc(a.album_group) : ''}${a.is_saved ? ' · saved ✓' : ''}</div>
     ${badges(a)}
+    ${mediaBadges(a)}
   </div>`;
 
 const views = {
@@ -735,6 +736,7 @@ const views = {
             <span class="song-sub">${esc(row.artists ?? '')}</span>
             <span class="song-album">${DL} ${label[row.kind] ?? row.kind}</span>
           </div>
+          ${mediaBadges(row)}
           <div class="song-end"><span class="song-dur">${ago(row.added_at)}</span></div>
         </div>`;
       }).join('')}</div>`;

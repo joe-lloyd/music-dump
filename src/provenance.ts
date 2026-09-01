@@ -112,6 +112,19 @@ export function provenanceKey(artist: string | null | undefined, title: string |
   return a && t ? `${a}|${t}` : '';
 }
 
+/**
+ * Lookup key for a whole release.
+ *
+ * The same record is named two different ways in this system: Lidarr's folders
+ * are "Seasons in the Abyss (1990) [Album]" while the tags inside say
+ * "Seasons in the Abyss". Everything from the first bracket on is dropped so
+ * both land on one key.
+ */
+export function albumMatchKey(artist: string | null | undefined, album: string | null | undefined): string {
+  const bare = String(album ?? '').replace(/\s*[([].*$/, '').trim();
+  return provenanceKey(artist, bare);
+}
+
 export interface ProvenanceRow {
   path: string;
   artist: string;
@@ -172,6 +185,7 @@ export class ProvenanceStore {
   private readonly dbFile: string;
   private readonly now: () => number;
   private cache: { at: number; map: Map<string, Badge> } | null = null;
+  private albumCache: { at: number; map: Map<string, Badge> } | null = null;
 
   constructor(dbFile?: string, now: () => number = Date.now) {
     this.dbFile = dbFile ?? PROVENANCE_FILE;
@@ -213,6 +227,7 @@ export class ProvenanceStore {
     this.db?.close();
     this.db = null;
     this.cache = null;
+    this.albumCache = null;
   }
 
   /**
@@ -267,6 +282,7 @@ export class ProvenanceStore {
       throw err;
     }
     this.cache = null;
+    this.albumCache = null;
     return written;
   }
 
@@ -288,6 +304,7 @@ export class ProvenanceStore {
       throw err;
     }
     this.cache = null;
+    this.albumCache = null;
     return gone.length;
   }
 
@@ -334,6 +351,51 @@ export class ProvenanceStore {
     const total = Object.values(sources).reduce((sum, n) => sum + n, 0);
     const latest = db.prepare('SELECT MAX(scanned_at) at FROM track_provenance').get() as { at: string | null };
     return { sources, tiers, total, scannedAt: latest?.at ?? null };
+  }
+
+  /**
+   * artist+album -> badge, for the Albums grid and Latest downloads.
+   *
+   * The tier shown is the *modal* one across the album's files, not the best
+   * and not the worst: one bonus track in a different format should not
+   * relabel a whole record in either direction. Source is picked the same way.
+   */
+  albumBadges(ttlMs = 60_000): Map<string, Badge> {
+    if (this.albumCache && this.now() - this.albumCache.at < ttlMs) return this.albumCache.map;
+    const groups = new Map<string, { tiers: Map<QualityTier, number>; sources: Map<Source, number>; sample: ProvenanceRow }>();
+    for (const row of this.handle()
+      .prepare("SELECT * FROM track_provenance WHERE album IS NOT NULL AND album <> ''")
+      .all() as ProvenanceRow[]) {
+      const key = albumMatchKey(row.artist, row.album);
+      if (!key) continue;
+      let group = groups.get(key);
+      if (!group) {
+        group = { tiers: new Map(), sources: new Map(), sample: row };
+        groups.set(key, group);
+      }
+      const tier = badgeOf(row).tier;
+      group.tiers.set(tier, (group.tiers.get(tier) ?? 0) + 1);
+      group.sources.set(row.source, (group.sources.get(row.source) ?? 0) + 1);
+    }
+    const top = <T,>(counts: Map<T, number>): T => [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])[0][0];
+    const map = new Map<string, Badge>();
+    for (const [key, group] of groups) {
+      const tier = top(group.tiers);
+      map.set(key, {
+        tier,
+        quality: qualityLabel(tier, {
+          codec: group.sample.codec,
+          bitrate: group.sample.bitrate,
+          sampleRate: group.sample.sample_rate,
+          bitDepth: group.sample.bit_depth,
+        }),
+        source: top(group.sources),
+        detail: group.sample.detail,
+      });
+    }
+    this.albumCache = { at: this.now(), map };
+    return map;
   }
 
   /**

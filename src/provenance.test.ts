@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
-  ProvenanceStore, provenanceKey, qualityLabel, qualityTier, type ScanInput,
+  ProvenanceStore, albumMatchKey, provenanceKey, qualityLabel, qualityTier, type ScanInput,
 } from './provenance.ts';
 
 const withStore = (fn: (store: ProvenanceStore) => void): void => {
@@ -106,6 +106,40 @@ test('rows without an artist or title never collide under the empty key', () => 
     ]);
     assert.equal(store.badges(0).size, 0);
     assert.equal(store.summary().total, 2);
+  });
+});
+
+test('album keys reconcile Lidarr folder names with the tags inside them', () => {
+  const bare = albumMatchKey('Slayer', 'Seasons in the Abyss');
+  assert.equal(albumMatchKey('Slayer', 'Seasons in the Abyss (1990) [Album]'), bare);
+  assert.equal(albumMatchKey('Slayer', 'Seasons in the Abyss [Album]'), bare);
+  assert.equal(albumMatchKey('Slayer', ''), '');
+});
+
+test('an album badge reports the modal tier, not the best or worst track', () => {
+  withStore((store) => {
+    // Nine FLACs and one bonus MP3: the record is a FLAC record.
+    const tracks = Array.from({ length: 9 }, (_, i) => row({
+      path: `/lib/flac-${i}.flac`, title: `Track ${i}`, album: 'Seasons in the Abyss',
+    }));
+    tracks.push(row({
+      path: '/lib/bonus.mp3', title: 'Bonus', album: 'Seasons in the Abyss',
+      codec: 'mp3', bitrate: 320, bit_depth: null, source: 'torrent',
+    }));
+    store.upsert(tracks);
+    const badge = store.albumBadges(0).get(albumMatchKey('Slayer', 'Seasons in the Abyss (1990) [Album]'));
+    assert.equal(badge?.tier, 'lossless');
+    assert.equal(badge?.source, 'usenet');
+  });
+});
+
+test('rescanning invalidates the album cache as well as the track cache', () => {
+  withStore((store) => {
+    store.upsert([row({ path: '/lib/a.mp3', codec: 'mp3', bitrate: 320, bit_depth: null })]);
+    assert.equal(store.albumBadges().get(albumMatchKey('Slayer', 'Seasons in the Abyss'))?.tier, 'high');
+    // Same default TTL, so a stale cache would still answer "high" here.
+    store.upsert([row({ path: '/lib/a.mp3' })]);
+    assert.equal(store.albumBadges().get(albumMatchKey('Slayer', 'Seasons in the Abyss'))?.tier, 'lossless');
   });
 });
 
