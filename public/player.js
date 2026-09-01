@@ -113,8 +113,9 @@
       const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}');
       queue = Array.isArray(saved.queue) ? saved.queue.filter((item) => item?.id).slice(0, 500) : [];
       queueIndex = Number.isInteger(saved.queueIndex) && saved.queueIndex < queue.length ? saved.queueIndex : -1;
-      audioA.volume = audioB.volume = Number.isFinite(saved.volume) ? Math.max(0, Math.min(1, saved.volume)) : .72;
-      volume.value = String(audio.volume);
+      audioA.volume = audioB.volume = Number.isFinite(saved.volume) ? Math.max(0, Math.min(1, saved.volume)) : .52;
+      // The stored value is the gain; the slider shows its position.
+      volume.value = String(positionFor(audio.volume));
       // Reopening the page keeps the track and the spot in it: paint the
       // bar in a resume state and seek after the first (gesture-gated) play.
       const item = queue[queueIndex];
@@ -135,8 +136,26 @@
     } catch {
       queue = [];
       queueIndex = -1;
-      audioA.volume = audioB.volume = .72;
+      audioA.volume = audioB.volume = .52;
     }
+  };
+
+  // Local and library albums are served by this app; only Spotify ids go to
+  // the /img/albums route. Same rule as the pages, so a track looks identical
+  // wherever it appears.
+  // Inline onerror needs a global. Same two-step as the pages: try the
+  // app-served cover, fall back to the CDN url, then let the letter show.
+  window.queueArtError = (img) => {
+    const cdn = img.dataset.cdn;
+    if (cdn) { img.dataset.cdn = ''; img.src = cdn; return; }
+    img.remove();
+  };
+
+  const artUrl = (albumId) => {
+    if (!albumId) return '';
+    return /^(localalbum|libalbum)-/.test(albumId)
+      ? `/img/local/${encodeURIComponent(albumId)}.jpg`
+      : `/img/albums/${encodeURIComponent(albumId)}.jpg`;
   };
 
   const renderQueue = () => {
@@ -144,6 +163,10 @@
     queueList.innerHTML = queue.length ? queue.map((item, index) => `
       <button class="queue-item${index === queueIndex ? ' on' : ''}" type="button" data-queue-index="${index}">
         <span class="queue-index">${String(index + 1).padStart(2, '0')}</span>
+        <span class="queue-art">${item.albumId
+          ? `<img src="${escapeHtml(artUrl(item.albumId))}" alt="" loading="lazy"
+                  data-cdn="${escapeHtml(item.imageUrl || '')}" onerror="queueArtError(this)">`
+          : ''}<i>${escapeHtml((item.name || '?').slice(0, 1).toUpperCase())}</i></span>
         <span><b>${escapeHtml(item.name || 'Unknown track')}</b><small>${escapeHtml(item.artists || '')}</small></span>
         <span class="queue-duration">${formatTime((item.durationMs ?? 0) / 1000)}</span>
       </button>`).join('') : '<div class="empty">Your queue is empty</div>';
@@ -156,6 +179,8 @@
       name: button.dataset.trackName || 'Unknown track',
       artists: button.dataset.trackArtists || '',
       durationMs: Number(button.dataset.trackDuration || 0),
+      albumId: button.dataset.trackAlbum || '',
+      imageUrl: button.dataset.trackImage || '',
     })).filter((item) => item.id && !seen.has(item.id) && seen.add(item.id));
     queueIndex = Math.max(0, queue.findIndex((item) => item.id === selectedId));
     renderQueue();
@@ -165,9 +190,10 @@
   const setArtwork = (track) => {
     art.removeAttribute('src');
     artFallback.textContent = (track.name || 'MT').slice(0, 1).toUpperCase();
-    if (!track.album_id) return;
-    art.dataset.cdn = track.image_url || '';
-    art.src = `/img/albums/${encodeURIComponent(track.album_id)}.jpg`;
+    const albumId = track.album_id || track.albumId;
+    if (!albumId) return;
+    art.dataset.cdn = track.image_url || track.imageUrl || '';
+    art.src = artUrl(albumId);
   };
 
   art.addEventListener('error', () => {
@@ -182,9 +208,13 @@
 
   const updateMediaSession = (track) => {
     if (!('mediaSession' in navigator) || !('MediaMetadata' in window)) return;
-    const artwork = track.album_id ? [
-      { src: `/img/albums/${encodeURIComponent(track.album_id)}.jpg`, sizes: '512x512', type: 'image/jpeg' },
-    ] : [];
+    // The OS media panel and lock screen read this. It used to hardcode the
+    // Spotify route, so anything from the local library showed no art at all
+    // outside the browser tab.
+    const albumId = track.album_id || track.albumId;
+    const artwork = albumId
+      ? [{ src: artUrl(albumId), sizes: '512x512', type: 'image/jpeg' }]
+      : [];
     navigator.mediaSession.metadata = new MediaMetadata({
       title: track.name,
       artist: track.artists || '',
@@ -531,7 +561,20 @@
   scrubber.addEventListener('input', () => {
     if (Number.isFinite(audio.duration)) audio.currentTime = (Number(scrubber.value) / 1000) * audio.duration;
   });
-  volume.addEventListener('input', () => { audioA.volume = audioB.volume = Number(volume.value); save(); });
+  // Loudness is perceived roughly logarithmically, so a linear slider spends
+  // most of its travel in a range that already sounds loud and makes the first
+  // few percent lurch. Squaring the position gives back a slider where a small
+  // move near the bottom is a small change in what you hear.
+  //
+  // Squared rather than a full dB curve because it needs an exact inverse for
+  // restoring the saved position, and x^2 / sqrt(x) is exactly invertible.
+  const gainFor = (position) => Math.max(0, Math.min(1, Number(position))) ** 2;
+  const positionFor = (gain) => Math.sqrt(Math.max(0, Math.min(1, Number(gain))));
+
+  volume.addEventListener('input', () => {
+    audioA.volume = audioB.volume = gainFor(volume.value);
+    save();
+  });
   // The queue and lyrics panels share the same corner — only one at a time.
   queueButton.addEventListener('click', () => {
     queuePanel.hidden = !queuePanel.hidden;

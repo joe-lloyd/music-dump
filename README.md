@@ -193,6 +193,34 @@ page, but keeps everything else: real durations, disc/track order, per-track
 quality and source badges, and Play album.
 
 
+### Artwork and volume in the player
+
+Album art follows a track everywhere it goes. The play button carries the
+album id and cover url as data attributes, so whatever the player builds from
+a queue — the queue list, the bar, and the OS media panel via Media Session —
+shows the same cover as the page the track was started from. One rule decides
+the url in both the pages and `player.js`: `localalbum-`/`libalbum-` ids are
+served by this app at `/img/local/`, everything else goes to `/img/albums/`.
+Hardcoding the Spotify route is what left local music with no art on the lock
+screen.
+
+The volume slider is **squared**, not linear. Loudness is perceived roughly
+logarithmically, so a linear control spends most of its travel in a range that
+already sounds loud and makes the first few percent lurch. `gain = position²`
+gives a slider where a small move near the bottom is a small change in what
+you hear:
+
+```
+slider 0.05 → gain 0.003      slider 0.50 → gain 0.250
+slider 0.10 → gain 0.010      slider 0.72 → gain 0.518
+slider 0.25 → gain 0.063      slider 1.00 → gain 1.000
+```
+
+Squared rather than a true dB curve because the saved value is the *gain* and
+the slider needs its exact inverse to restore position — `x²`/`√x` round-trips
+exactly, and a dB mapping with a floor does not.
+
+
 ## CDs tab — the physical shelf
 
 Discs owned on CD, synced from a Discogs collection, tracked through to ripped.

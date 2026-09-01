@@ -252,7 +252,10 @@ function imgErr(el) {
 const DL = '<svg viewBox="0 0 24 24" width="1em" height="1em" aria-hidden="true"><path fill="currentColor" d="M11 3h2v8h3l-4 4-4-4h3z"/><path fill="currentColor" d="M5 19h14v2H5z"/></svg>';
 const dlBadge = `<span class="dl" title="downloaded in the library">${DL}</span>`;
 const PLAY = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z"/></svg>';
-const playControl = (track) => track.id ? `<button class="track-play" type="button" data-track-id="${esc(track.id)}" data-track-name="${esc(track.name)}" data-track-artists="${esc(track.artists ?? track.artist_name ?? '')}" data-track-duration="${Number(track.duration_ms ?? 0)}" aria-label="Play ${esc(track.name)}">${PLAY}</button>` : '';
+// The album id and cover travel with the button, so anything the player
+// builds from a queue - the queue list, the bar, the OS lock screen - can
+// show the same artwork as the page it was started from.
+const playControl = (track) => track.id ? `<button class="track-play" type="button" data-track-id="${esc(track.id)}" data-track-name="${esc(track.name)}" data-track-artists="${esc(track.artists ?? track.artist_name ?? '')}" data-track-duration="${Number(track.duration_ms ?? 0)}" data-track-album="${esc(track.album_id ?? '')}" data-track-image="${esc(track.image_url ?? '')}" aria-label="Play ${esc(track.name)}">${PLAY}</button>` : '';
 const upgradeControl = (track) => track.id ? `<button class="track-upgrade" type="button" data-upgrade-track="${esc(track.id)}" aria-label="Queue ${esc(track.name)} for a FLAC upgrade" title="Queue FLAC upgrade"><span>FLAC</span>&uarr;</button>` : '';
 // Ids the server serves art for directly, rather than the Spotify CDN.
 const localArt = (id) => /^(localalbum|libalbum)-/.test(String(id ?? ''));

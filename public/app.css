@@ -1068,6 +1068,31 @@ input[type="range"] {
 
 .volume-control input { width: 130px; }
 
+/* Queue rows carry the same cover as the page they were queued from; the
+   letter behind it shows through when there is no art. */
+.queue-art {
+  position: relative;
+  display: grid;
+  flex: 0 0 34px;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--surface-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.queue-art img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
 .queue-panel {
   position: fixed;
   z-index: 80;
@@ -1105,7 +1130,8 @@ input[type="range"] {
 
 .queue-item {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) auto;
+  /* index, cover, title/artist, duration */
+  grid-template-columns: 22px 34px minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   width: 100%;

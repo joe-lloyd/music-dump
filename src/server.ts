@@ -834,6 +834,10 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
           return {
             id: libTrackId(track.path),
             name: track.title,
+            // Carried so a play button knows which cover to show once the
+            // track is in the queue, the bar, or the OS media panel.
+            album_id: id,
+            album: track.album,
             disc_number: track.disc_number ?? 1,
             track_number: track.track_number,
             duration_ms: track.duration_ms,
@@ -872,6 +876,8 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
         tracks: tracks.map((track) => ({
           id: track.id,
           name: track.name,
+          album_id: id,
+          album: track.album,
           disc_number: 1,
           track_number: track.track_number,
           duration_ms: track.duration_ms,
@@ -890,7 +896,7 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
         SELECT a.id, a.name FROM album_artists aa JOIN artists a ON a.id = aa.artist_id
         WHERE aa.album_id = ? ORDER BY aa.position`, id),
       tracks: query(`
-        SELECT t.id, t.name, t.disc_number, t.track_number, t.duration_ms, t.explicit,
+        SELECT t.id, t.name, t.album_id, t.disc_number, t.track_number, t.duration_ms, t.explicit,
                (SELECT group_concat(a.name, ', ' ORDER BY ta.position)
                   FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
                  WHERE ta.track_id = t.id) AS artists,
