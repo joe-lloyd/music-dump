@@ -158,6 +158,41 @@ scanned file simply comes back unbadged.
 > just the artist, and every lookup missed. `syntax.test.ts` now fails on a NUL
 > byte anywhere in `src/`.
 
+## Navigation is not bound to Spotify
+
+Every album the library physically holds has a page, plays, and is reachable —
+whether Spotify has ever heard of it or not. Before this, an album's id came
+only from the taste DB, so roughly a third of the newest downloads had no
+cover, no link, and nowhere to go: usenet and Soulseek grabs of records Spotify
+does not carry were invisible to the app that downloaded them.
+
+The library's own catalogue comes from the provenance scanner:
+
+| | |
+|---|---|
+| `GET /api/library-albums` | every album on disk, newest first |
+| `GET /api/album?id=libalbum-…` | its page, from the scanner's record |
+| `libtrack-…` | a playable track id, resolved by exact path |
+
+**An album is a folder.** Identity is the directory hash, not artist+title.
+Grouping on the tagged artist tore releases in half — "Serj Tankian" and "Serj
+Tankian feat. Bic Runga" became two albums out of one record, and 1,007
+"albums" collapsed to the correct 869 once folders became the unit. The folder
+is also what cover art and every download pipeline already agree on.
+
+**A track is a path.** `libtrack-` ids are a digest of the file path, because
+a path is the only thing unique per file — two tracks on one album can share a
+title (a reprise, the same song on two discs) and a slug would collide.
+Playback resolves through `matchPath`, so it is exact and can never pick the
+wrong recording, the same guarantee the intake files already had.
+
+Library tracks are shaped like taste tracks (`libAsTasteTrack`), so the player,
+queue, lyrics and play-recording carry them with no parallel code path. The
+album page hides the Spotify button and does not link a nonexistent artist
+page, but keeps everything else: real durations, disc/track order, per-track
+quality and source badges, and Play album.
+
+
 ## CDs tab — the physical shelf
 
 Discs owned on CD, synced from a Discogs collection, tracked through to ripped.

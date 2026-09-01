@@ -12,7 +12,11 @@ import { JellyfinBridge, LOCAL_LIBRARY_PREFIX, type TasteTrack } from './jellyfi
 import { LyricsService } from './lyrics.ts';
 import { resolveViaSearch } from './musicbrainz.ts';
 import { APP_PLAYS_FILE, PlaysStore } from './plays.ts';
-import { ProvenanceStore, albumMatchKey, provenanceKey, type ScanInput } from './provenance.ts';
+import {
+  LIB_ALBUM_PREFIX, ProvenanceStore, albumMatchKey, badgeOf, libAlbumId, libAlbumIdForFolder,
+  libTrackId,
+  provenanceKey, type ProvenanceRow, type ScanInput,
+} from './provenance.ts';
 import {
   UpgradeStore, localAlbumId, type BatchTrack, type LocalTrack, type SourceMode,
   type UpgradeJob, validWorkerToken,
@@ -100,12 +104,33 @@ function localTrack(id: string): LocalTrack | null {
   return upgrades.localTracks().find((track) => track.id === id) ?? null;
 }
 
+// A scanned library file, shaped like a taste track. Same trick as
+// localAsTasteTrack: the rest of the app - player, lyrics, plays, queue -
+// then carries library music without knowing it is not from Spotify.
+function libAsTasteTrack(row: ProvenanceRow): TasteTrack {
+  return {
+    id: libTrackId(row.path),
+    name: row.title,
+    album_id: libAlbumId(row.path),
+    album: row.album,
+    artists: row.artist,
+    duration_ms: row.duration_ms,
+    disc_number: row.disc_number,
+    track_number: row.track_number,
+    image_url: null,
+  };
+}
+
 // Local files resolve by the exact path the worker installed them to, never
 // by title matching: Jellyfin may not have probed their tags yet, and an
 // exact path can never resolve to the wrong recording.
 async function resolveMatch(track: TasteTrack) {
   const local = localTrack(track.id);
   if (local) return jellyfin.matchPath(local.path);
+  // A library track knows its own file, so it resolves exactly rather than by
+  // title - the same reasoning as intake files, applied to the whole library.
+  const scanned = provenance.trackById(track.id);
+  if (scanned) return jellyfin.matchPath(scanned.path);
   return jellyfin.match(track);
 }
 
@@ -169,6 +194,26 @@ function mtime(at: string): number {
  * Falls back to the directory for multi-disc releases, where the audio sits in
  * CD 01/ subfolders and the top level legitimately holds none.
  */
+/** Library-relative path, for the folder-art endpoint. */
+function relOf(workerPath: string): string {
+  const normalized = String(workerPath ?? '').replace(/\\/g, '/');
+  for (const prefix of [LOCAL_LIBRARY_PREFIX, APP_LIBRARY_PREFIX]) {
+    if (normalized.startsWith(prefix + '/')) return normalized.slice(prefix.length + 1);
+  }
+  return normalized;
+}
+
+/**
+ * The album title inside a Lidarr folder name.
+ *
+ * Folders are "Album (Year) [Type]" while the tags inside say "Album", and
+ * the library album id is built from the tags - so the suffix has to come off
+ * before the two can agree on an id.
+ */
+function albumTitleOf(folderName: string): string {
+  return String(folderName ?? '').replace(/\s*[([].*$/, '').trim();
+}
+
 function albumLanded(dir: string): number {
   let newest = 0;
   try {
@@ -325,6 +370,8 @@ function resolveImportedArtists(batch = 5): void {
 function tasteTrack(id: string): TasteTrack | null {
   const local = localTrack(id);
   if (local) return localAsTasteTrack(local);
+  const scanned = provenance.trackById(id);
+  if (scanned) return libAsTasteTrack(scanned);
   return (query(`
     SELECT t.id, t.name, t.album_id, t.duration_ms, t.disc_number, t.track_number,
            al.name AS album, al.image_url,
@@ -730,6 +777,50 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
 
   '/api/album': (params) => {
     const id = params.get('id') ?? '';
+    // An album the library holds but Spotify never knew. Rendered from the
+    // scanner's own record, so it carries real durations, track order,
+    // per-track quality and a working play button.
+    if (id.startsWith(LIB_ALBUM_PREFIX)) {
+      const tracks = provenance.albumTracks(id);
+      if (!tracks.length) return { album: null, artists: [], tracks: [] };
+      const first = tracks[0];
+      const newest = Math.max(...tracks.map((track) => Number(track.mtime ?? 0)));
+      return {
+        album: {
+          id,
+          name: first.album,
+          album_type: 'library',
+          release_date: new Date(newest * 1000).toISOString().slice(0, 10),
+          image_url: `/img/folder?rel=${encodeURIComponent(relOf(first.path))}`,
+          total_tracks: tracks.length,
+          is_saved: 0,
+          downloaded: 1,
+          local: 1,
+          source: first.source,
+        },
+        artists: [{ id: null, name: first.artist }],
+        tracks: tracks.map((track) => {
+          const badge = badgeOf(track);
+          return {
+            id: libTrackId(track.path),
+            name: track.title,
+            disc_number: track.disc_number ?? 1,
+            track_number: track.track_number,
+            duration_ms: track.duration_ms,
+            explicit: 0,
+            artists: track.artist,
+            liked: 0,
+            local: 1,
+            // Per file, not per album: one Soulseek folder can mix a 24-bit
+            // rip with a transcode, and the tracklist is where that shows.
+            quality: badge.tier,
+            quality_label: badge.quality,
+            source: badge.source,
+            source_detail: badge.detail,
+          };
+        }),
+      };
+    }
     if (id.startsWith(LOCAL_ALBUM_PREFIX)) {
       const tracks = upgrades.localTracks().filter((track) => track.album_id === id);
       if (!tracks.length) return { album: null, artists: [], tracks: [] };
@@ -801,6 +892,21 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
     codec: track.codec,
     standalone: track.standalone ? 1 : 0,
     added_at: track.added_at,
+  })),
+
+  // Every album on disk, whether or not Spotify has ever heard of it. This is
+  // the catalogue the UI navigates; binding it to Spotify left most of the
+  // library unreachable.
+  '/api/library-albums': () => provenance.albums().map((album) => ({
+    id: album.id,
+    name: album.name,
+    artists: album.artists,
+    total_tracks: album.total_tracks,
+    added_at: album.added_at,
+    image_url: `/img/folder?rel=${encodeURIComponent(relOf(album.rel))}`,
+    downloaded: 1,
+    local: 1,
+    source: album.source,
   })),
 
   '/api/albums': () => [
@@ -1123,6 +1229,15 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
     const indexed = jellyfin.indexedRelPaths();
     return rows.map(({ rel, ...row }) => ({
       ...row,
+      // Spotify's id when it has one, otherwise the library's own. Every card
+      // links somewhere; nothing is navigable only by Spotify's permission.
+      // An album row's rel IS the folder; a single's rel is the audio file, so
+      // its "album" is the artist's singles folder that holds it.
+      album_id: row.album_id ?? (rel
+        ? libAlbumIdForFolder(row.kind === 'single'
+          ? `${LOCAL_LIBRARY_PREFIX}/${String(rel).replace(/\/[^/]*$/, '')}`
+          : `${LOCAL_LIBRARY_PREFIX}/${rel}`)
+        : null),
       // Spotify artwork when the taste DB has it, otherwise the cover Lidarr
       // wrote into the folder. Singles live as a file rather than a directory,
       // so those fall back to the artist folder's art.

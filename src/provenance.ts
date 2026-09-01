@@ -10,6 +10,7 @@
 // headers, joins Lidarr's grab history for the origin, and posts batches here.
 // Nothing else writes it, and dropping the file loses nothing but a rescan.
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { normalizeMusicText } from './jellyfin.ts';
@@ -125,6 +126,66 @@ export function albumMatchKey(artist: string | null | undefined, album: string |
   return provenanceKey(artist, bare);
 }
 
+export const LIB_ALBUM_PREFIX = 'libalbum-';
+export const LIB_TRACK_PREFIX = 'libtrack-';
+
+/**
+ * Stable ids for music the taste DB has never heard of.
+ *
+ * The library is fed by five pipelines and Spotify knows about maybe half of
+ * it, so binding navigation to Spotify ids left most of the collection with
+ * no album page at all. These ids are derived from what the library itself
+ * knows, so every album is reachable regardless of who supplied it.
+ *
+ * Both are restricted to the characters the client router accepts
+ * ([A-Za-z0-9-]), because an id that cannot appear in a URL is not an id.
+ */
+
+/** The album folder a file sits in, as a library-relative path. */
+export function albumFolderOf(filePath: string): string {
+  const normalized = String(filePath ?? '').replace(/\\/g, '/');
+  const cut = normalized.lastIndexOf('/');
+  return cut > 0 ? normalized.slice(0, cut) : normalized;
+}
+
+/**
+ * Identity is the FOLDER, not the artist and title.
+ *
+ * Grouping on the tagged artist tore releases in half: an album whose tracks
+ * carry different feature credits ("Serj Tankian" on one track, "Serj Tankian
+ * feat. Bic Runga" on the next) became two albums out of one record. The
+ * folder is what the release physically is, and it is also what the cover art
+ * and the download pipelines already agree on.
+ *
+ * Hashed because a path contains characters a URL route cannot, and because
+ * two different artists can own identically named folders.
+ */
+export function libAlbumId(filePath: string | null | undefined): string {
+  return libAlbumIdForFolder(albumFolderOf(String(filePath ?? '')));
+}
+
+/**
+ * The same id from the folder itself, for callers that already have the
+ * directory rather than a file inside it. Latest is one: an album row names a
+ * directory, but a single names the audio file, and passing a directory to
+ * libAlbumId would silently take its parent — every album in an artist's
+ * folder collapsing onto one id.
+ */
+export function libAlbumIdForFolder(folder: string | null | undefined): string {
+  const clean = String(folder ?? '').replace(/\\/g, '/').replace(/\/+$/, '');
+  if (!clean) return '';
+  return LIB_ALBUM_PREFIX + createHash('sha1').update(clean).digest('hex').slice(0, 16);
+}
+
+/**
+ * Hashed rather than slugged: a path is the only thing guaranteed unique per
+ * file, and two tracks in one album can share a title (a reprise, or the same
+ * song on two discs). A slug would collide; a digest cannot.
+ */
+export function libTrackId(filePath: string): string {
+  return LIB_TRACK_PREFIX + createHash('sha1').update(String(filePath)).digest('hex').slice(0, 16);
+}
+
 export interface ProvenanceRow {
   path: string;
   artist: string;
@@ -139,6 +200,9 @@ export interface ProvenanceRow {
   size_bytes: number | null;
   mtime: number | null;
   scanned_at: string;
+  duration_ms: number | null;
+  track_number: number | null;
+  disc_number: number | null;
 }
 
 export interface Badge {
@@ -178,6 +242,9 @@ export interface ScanInput {
   bit_depth?: number | null;
   size_bytes?: number | null;
   mtime?: number | null;
+  duration_ms?: number | null;
+  track_number?: number | null;
+  disc_number?: number | null;
 }
 
 export class ProvenanceStore {
@@ -214,11 +281,22 @@ export class ProvenanceStore {
           bit_depth INTEGER,
           size_bytes INTEGER,
           mtime INTEGER,
-          scanned_at TEXT NOT NULL
+          scanned_at TEXT NOT NULL,
+          duration_ms INTEGER,
+          track_number INTEGER,
+          disc_number INTEGER
         );
         CREATE INDEX IF NOT EXISTS provenance_key ON track_provenance(match_key);
         CREATE INDEX IF NOT EXISTS provenance_source ON track_provenance(source);
+        CREATE INDEX IF NOT EXISTS provenance_album ON track_provenance(artist, album);
       `);
+      // Additive migration: deployed databases predate the album-page columns
+      // and must gain them in place rather than being rebuilt.
+      const columns = new Set((this.db.prepare('PRAGMA table_info(track_provenance)')
+        .all() as { name: string }[]).map((column) => column.name));
+      for (const [name, type] of [['duration_ms', 'INTEGER'], ['track_number', 'INTEGER'], ['disc_number', 'INTEGER']]) {
+        if (!columns.has(name)) this.db.exec(`ALTER TABLE track_provenance ADD COLUMN ${name} ${type}`);
+      }
     }
     return this.db;
   }
@@ -240,15 +318,17 @@ export class ProvenanceStore {
     const stmt = db.prepare(`
       INSERT INTO track_provenance
         (path, match_key, artist, title, album, source, detail,
-         codec, bitrate, sample_rate, bit_depth, size_bytes, mtime, scanned_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         codec, bitrate, sample_rate, bit_depth, size_bytes, mtime, scanned_at,
+         duration_ms, track_number, disc_number)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(path) DO UPDATE SET
         match_key = excluded.match_key, artist = excluded.artist, title = excluded.title,
         album = excluded.album, source = excluded.source, detail = excluded.detail,
         codec = excluded.codec, bitrate = excluded.bitrate,
         sample_rate = excluded.sample_rate, bit_depth = excluded.bit_depth,
         size_bytes = excluded.size_bytes, mtime = excluded.mtime,
-        scanned_at = excluded.scanned_at
+        scanned_at = excluded.scanned_at, duration_ms = excluded.duration_ms,
+        track_number = excluded.track_number, disc_number = excluded.disc_number
     `);
     let written = 0;
     db.exec('BEGIN IMMEDIATE');
@@ -273,6 +353,9 @@ export class ProvenanceStore {
           row.size_bytes == null ? null : Math.round(Number(row.size_bytes)),
           row.mtime == null ? null : Math.round(Number(row.mtime)),
           at,
+          row.duration_ms == null ? null : Math.round(Number(row.duration_ms)),
+          row.track_number == null ? null : Math.round(Number(row.track_number)),
+          row.disc_number == null ? null : Math.round(Number(row.disc_number)),
         );
         written += 1;
       }
@@ -407,6 +490,62 @@ export class ProvenanceStore {
     return this.handle().prepare(
       "SELECT artist, album FROM track_provenance WHERE album IS NOT NULL AND album <> '' GROUP BY artist, album",
     ).all() as { artist: string; album: string | null }[];
+  }
+
+  /**
+   * Every album the library physically holds, newest first.
+   *
+   * This is the catalogue the UI navigates: it owes nothing to Spotify, so an
+   * album that arrived by usenet, torrent, Soulseek, YouTube or a CD rip is
+   * as reachable as one Spotify happens to know.
+   */
+  albums(): { id: string; name: string; artists: string; total_tracks: number; added_at: string; source: Source; rel: string }[] {
+    const folders = new Map<string, ProvenanceRow[]>();
+    for (const row of this.handle().prepare('SELECT * FROM track_provenance').all() as ProvenanceRow[]) {
+      const folder = albumFolderOf(row.path);
+      if (!folder) continue;
+      (folders.get(folder) ?? folders.set(folder, []).get(folder)!).push(row);
+    }
+    // Undefined for an empty list rather than throwing: a folder of untagged
+    // files has no album name and no artist, and it still deserves a page.
+    const modal = <T,>(values: T[]): T | undefined => {
+      const counts = new Map<T, number>();
+      for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
+      return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+    };
+    return [...folders.entries()].map(([folder, rows]) => {
+      const name = modal(rows.map((row) => row.album).filter(Boolean) as string[])
+        // A folder of loose singles has no album tag; its own name is the
+        // best label available.
+        ?? folder.slice(folder.lastIndexOf('/') + 1);
+      return {
+        id: libAlbumId(rows[0].path),
+        name: String(name),
+        // Album artist, not track artist: the credit shared by most tracks,
+        // so a featured guest on two songs does not rename the record.
+        artists: modal(rows.map((row) => row.artist).filter(Boolean)) ?? '',
+        total_tracks: rows.length,
+        added_at: new Date(Math.max(...rows.map((row) => Number(row.mtime ?? 0))) * 1000).toISOString(),
+        source: modal(rows.map((row) => row.source)) ?? 'unknown',
+        rel: rows[0].path,
+      };
+    }).sort((a, b) => b.added_at.localeCompare(a.added_at));
+  }
+
+  /** The tracks of one library album, in disc/track order. */
+  albumTracks(id: string): ProvenanceRow[] {
+    return (this.handle().prepare('SELECT * FROM track_provenance').all() as ProvenanceRow[])
+      .filter((row) => libAlbumId(row.path) === id)
+      .sort((a, b) => (a.disc_number ?? 1) - (b.disc_number ?? 1)
+        || (a.track_number ?? 0) - (b.track_number ?? 0)
+        || a.path.localeCompare(b.path));
+  }
+
+  /** One scanned file by its derived id, for playback. */
+  trackById(id: string): ProvenanceRow | null {
+    if (!id.startsWith(LIB_TRACK_PREFIX)) return null;
+    const rows = this.handle().prepare('SELECT * FROM track_provenance').all() as ProvenanceRow[];
+    return rows.find((row) => libTrackId(row.path) === id) ?? null;
   }
 
   /** Paths already scanned, with mtime+size, so the scanner can skip them. */

@@ -759,7 +759,8 @@ const views = {
     const saved = await api('/api/albums');
     return `<div class="tools"><input type="search" id="q" placeholder="search albums…"></div>
       ${saved.length ? `<h2>Saved (${saved.length})</h2><div class="al-grid" id="savedOut"></div>` : ''}
-      <h2>All albums</h2><div class="al-grid" id="allOut"></div>
+      <h2>In the library <small id="libCount"></small></h2><div class="al-grid" id="libOut"></div>
+      <h2>Everything Spotify knows</h2><div class="al-grid" id="allOut"></div>
       <div style="text-align:center;margin-top:1rem"><button class="spbtn" id="more">load more</button></div>`;
   },
 
@@ -979,7 +980,11 @@ const views = {
     const d = await api(`/api/album?id=${id}`);
     if (!d.album) return '<div class="empty">unknown album</div>';
     const al = d.album;
-    const artistLinks = d.artists.map((x) => `<a href="#artist/${x.id}"><b>${esc(x.name)}</b></a>`).join(', ');
+    // A library album has no Spotify artist to link to, so the name stands
+    // alone rather than pointing at a page that does not exist.
+    const artistLinks = d.artists.map((x) => (x.id
+      ? `<a href="#artist/${x.id}"><b>${esc(x.name)}</b></a>`
+      : `<b>${esc(x.name)}</b>`)).join(', ');
     const meta = [
       (al.release_date ?? '').slice(0, 10), al.album_type,
       al.total_tracks ? `${al.total_tracks} tracks` : '',
@@ -1010,10 +1015,11 @@ const views = {
           <h1>${esc(al.name)}</h1>
           <div class="meta">${artistLinks}</div>
           <div class="meta">${meta}</div>
+          ${al.source ? `<div class="chips"><span class="chip">${esc(SOURCE_META[al.source] ? SOURCE_META[al.source].tip : al.source)}</span></div>` : ''}
           ${badges(al)}
           <div class="hero-actions">
             ${al.downloaded && d.tracks.length ? `<button class="primary-action play-album" type="button">${PLAY} Play album</button>` : ''}
-            ${spbtn('album', al.id)}
+            ${al.local ? '' : spbtn('album', al.id)}
             ${bcbtn(`${d.artists[0]?.name ?? ''} ${al.name}`.trim(), 'a', al.downloaded ? 'Bandcamp ↗' : 'Get the FLAC on Bandcamp ↗')}
           </div>
         </div>
@@ -1220,12 +1226,26 @@ const after = {
           .map((a) => albumCell(a)).join('') || '<div class="empty">no matches</div>';
       });
     };
+    // The library catalogue: what is actually on disk, from the scanner rather
+    // than from Spotify. Rendered first because it is the part you can play.
+    const libOut = $('#libOut', el);
+    const libCount = $('#libCount', el);
+    let library = [];
+    const drawLibrary = () => {
+      const needle = q.value.toLowerCase();
+      const rows = library.filter((a) => !needle || `${a.name} ${a.artists}`.toLowerCase().includes(needle));
+      libCount.textContent = rows.length ? `(${rows.length})` : '';
+      libOut.innerHTML = rows.slice(0, 600).map((a) => albumCell(a)).join('')
+        || '<div class="empty">no matches on disk</div>';
+    };
+    api('/api/library-albums').then((rows) => { library = rows; drawLibrary(); });
+
     const paged = pager({
       url: '/api/albums-all', pageSize: 500,
       container: $('#allOut', el), moreBtn: $('#more', el),
       render: albumCell, empty: 'discography crawl still running — this fills in over the coming days',
     });
-    q.addEventListener('input', debounce(() => { drawSaved(); paged.search(q.value); }));
+    q.addEventListener('input', debounce(() => { drawSaved(); drawLibrary(); paged.search(q.value); }));
     drawSaved();
   },
   upgrades(el) {
