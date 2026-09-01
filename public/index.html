@@ -374,7 +374,7 @@ function stackChart(points, labelOf) {
 // Cumulative share-of-plays over ranked tracks: how deep the obsession
 // runs. Single hue, the 50% crossing gets a marked dot.
 function rabbitChart(pts, halfIdx) {
-  const W = 660, H = 170, base = H - 22, top = 14;
+  const W = 660, H = 84, base = H - 16, top = 8;
   const x = (i) => Math.round((i / Math.max(pts.length - 1, 1)) * (W - 8)) + 4;
   const y = (pct) => Math.round(base - (pct / 100) * (base - top));
   const path = pts.map((p, i) => `${i ? 'L' : 'M'}${x(i)},${y(p.pct)}`).join(' ');
@@ -569,19 +569,83 @@ const gigCard = (e, i = 0) => {
   </div>`;
 };
 
-const albumCell = (a) => `
-  <div class="cell">
-    <a href="#album/${a.id}">${pic('albums', a.id, a.image_url, a.name, a.downloaded ? dlBadge : '')}
-      <div class="nm">${esc(a.name)}</div></a>
-    <div class="sub">${esc(a.artists ?? '')}</div>
-    <div class="sub">${(a.release_date ?? '').slice(0, 4)}${a.album_group && a.album_group !== 'album' ? ' · ' + esc(a.album_group) : ''}${a.is_saved ? ' · saved ✓' : ''}</div>
-    ${badges(a)}
-    ${mediaBadges(a)}
+// THE standard album card. Everything album-shaped renders through this -
+// the Albums grid, an artist's discography, Latest downloads, the Overview's
+// new releases - so the library reads the same wherever an album appears:
+// art, name, artist, year (plus type when it isn't a plain album), then the
+// quality and source badges. `when` overlays a timestamp pill on the art,
+// which is how Latest keeps its download time.
+const albumCell = (a, when = '') => {
+  const id = a.id ?? a.album_id;
+  const href = id ? `#album/${id}` : null;
+  const bareName = String(a.name ?? '').replace(/\s*[(\[]\d{4}[)\]].*$/, '').replace(/\s*\[[^\]]*\]\s*$/, '');
+  const year = (a.release_date ?? '').slice(0, 4) || (String(a.name).match(/\((\d{4})\)/) ?? [])[1] || '';
+  const type = (a.album_group && a.album_group !== 'album') ? a.album_group
+    : (a.album_type === 'single' || a.kind === 'single') ? 'single' : '';
+  const line = [year, type, a.is_saved ? 'saved ✓' : ''].filter(Boolean).join(' · ');
+  return `
+  <div class="al-card">
+    ${href ? `<a class="al-art" href="${href}">` : '<span class="al-art">'}${pic('albums', id, a.image_url, bareName, a.downloaded ? dlBadge : '')}${when ? `<span class="al-when">${esc(when)}</span>` : ''}${href ? '</a>' : '</span>'}
+    <div class="al-body">
+      <b>${href ? `<a href="${href}">${esc(bareName)}</a>` : esc(bareName)}</b>
+      <span class="sub">${esc(a.artists ?? '')}</span>
+      ${line ? `<span class="sub dim">${esc(line)}</span>` : ''}
+      ${badges(a)}
+      ${mediaBadges(a)}
+    </div>
   </div>`;
+};
+
+// One FLAC-queue job as a card. Top level rather than inline in the view so
+// the refresh poll can re-render the list without rebuilding the whole page.
+const UPGRADE_LABEL = {
+  pending_source: 'downloading source', queued: 'ready for Soulseek', working: 'working now',
+  retry_wait: 'retry scheduled', upgraded: 'upgraded', already_lossless: 'already lossless',
+  exhausted: 'retries exhausted', cancelled: 'cancelled',
+};
+const upgradeCard = (j) => {
+  const batch = j.source_mode && j.source_mode !== 'single';
+  const label = batch && j.status === 'upgraded' ? 'album imported' : UPGRADE_LABEL[j.status] ?? j.status;
+  const due = j.next_attempt_at && ['retry_wait', 'queued', 'pending_source'].includes(j.status)
+    ? `${j.status === 'retry_wait' ? 'retry ' : ''}${until(j.next_attempt_at)}` : '';
+  const attempts = j.phase === 'source'
+    ? { used: j.source_attempts, max: 3, what: 'source' }
+    : { used: j.upgrade_attempts, max: j.max_attempts, what: 'FLAC' };
+  // The attempt budget as dots: spent, glowing when live, still available.
+  const dots = Array.from({ length: attempts.max }, (_, i) =>
+    `<i class="${i < attempts.used ? 'used' : ''}${j.status === 'working' && i === attempts.used ? ' live' : ''}"></i>`).join('');
+  const codec = j.current_codec
+    ? `<span class="q-badge ${j.current_codec === 'flac' ? 'q-lossless' : 'q-standard'}"><b>${esc(j.current_codec.toUpperCase())}</b></span>` : '';
+  const canRetry = ['retry_wait', 'exhausted', 'cancelled'].includes(j.status);
+  const canCancel = ['pending_source', 'queued', 'retry_wait'].includes(j.status);
+  const canRemove = ['upgraded', 'already_lossless', 'exhausted', 'cancelled'].includes(j.status);
+  const controls = [
+    canRetry ? `<button type="button" data-upgrade-retry="${j.id}">Retry now</button>` : '',
+    canCancel ? `<button type="button" data-upgrade-cancel="${j.id}">Cancel</button>` : '',
+    canRemove ? `<button type="button" class="danger" data-upgrade-remove="${j.id}">Remove</button>` : '',
+  ].join('');
+  const detail = batch && j.status === 'upgraded'
+    ? `${j.batch_size ?? 0} tracks imported and queued for FLAC`
+    : [j.track_number ? `track ${j.track_number}` : '', batch ? esc(j.source_mode) : '', due]
+      .filter(Boolean).join(' · ');
+  return `<div class="upgrade-card is-${esc(j.status)}">
+    <div class="upgrade-head">
+      <span class="upgrade-state ${esc(j.status)}">${j.status === 'working' ? '<i class="spin"></i>' : ''}${esc(label)}</span>
+      ${codec}
+    </div>
+    <b class="upgrade-title">${esc(j.title)}</b>
+    <span class="upgrade-sub">${esc(j.artist)}${j.album ? ` · ${esc(j.album)}` : ''}</span>
+    <div class="upgrade-tries" data-tip="${attempts.used} of ${attempts.max} ${attempts.what} attempts used">
+      <span class="upgrade-dots">${dots}</span><small>${attempts.used}/${attempts.max} ${attempts.what}${detail ? ` · ${detail}` : ''}</small>
+    </div>
+    ${j.last_error ? `<em class="upgrade-error">${esc(j.last_error)}</em>` : ''}
+    ${controls ? `<div class="upgrade-actions">${controls}</div>` : ''}
+  </div>`;
+};
 
 const views = {
   async overview() {
-    const [o, s] = await Promise.all([api('/api/overview'), api('/api/stats')]);
+    const [o, s, prov] = await Promise.all([api('/api/overview'), api('/api/stats'), api('/api/provenance')]);
     const c = o.counts;
     const delta = o.playsPrev30 ? Math.round(((o.plays30 - o.playsPrev30) / o.playsPrev30) * 100) : null;
     const trend = delta == null ? 'The record starts here — every play in this player now counts too.'
@@ -611,21 +675,33 @@ const views = {
         <span class="n">${a.n}</span>
       </a>`).join('');
 
-    const gmax = Math.max(...o.genres.map((g) => g.n), 1);
-    const gbars = o.genres.map((g) => `
-      <div class="lbl">${esc(g.genre)}</div>
-      <div class="bar" style="width:${Math.round((g.n / gmax) * 100)}%" data-tip="${esc(g.genre)} · ${g.n} liked tracks"></div>
-      <div class="n">${g.n}</div>`).join('');
+    // The library's fidelity and provenance, from the scanner. These carry
+    // the same colours and vocabulary as the per-track badges, so the
+    // overview and the row-level tags read as one system.
+    const TIER_META = [
+      ['hires', 'Hi-res', 'var(--gold)'], ['lossless', 'Lossless', 'var(--accent)'],
+      ['high', 'High · 320k', '#c9b2c4'], ['standard', 'Standard', '#8a7f88'],
+      ['low', 'Low', '#5c545b'],
+    ];
+    const SRC_LABEL = { usenet: 'Usenet', torrent: 'Torrents', soulseek: 'Soulseek', youtube: 'YouTube', cd: 'CD rips', unknown: 'Before records began' };
+    const provBars = (entries, total) => entries.map(([key, label, color, n]) => `
+      <div class="lbl">${label}</div>
+      <div class="bar" style="width:${Math.max(2, Math.round((n / total) * 100))}%;background:${color}" data-tip="${label} · ${n.toLocaleString()} files"></div>
+      <div class="n">${n.toLocaleString()}</div>`).join('');
+    const tierRows = TIER_META.filter(([k]) => prov.tiers[k])
+      .map(([k, label, color]) => [k, label, color, prov.tiers[k]]);
+    const srcRows = Object.entries(prov.sources).sort((a, b) => b[1] - a[1])
+      .map(([k, n]) => [k, SRC_LABEL[k] ?? k, k === 'soulseek' ? 'var(--violet)' : k === 'youtube' ? 'var(--coral)' : 'var(--accent)', n]);
+    const fidelityCard = `<div class="card"><h2>The library, honestly</h2>
+      ${prov.total ? `<p class="note">${prov.total.toLocaleString()} files, scanned ${ago(prov.scannedAt)}</p><div class="bars">${provBars(tierRows, prov.total)}</div>` : '<div class="empty">the library scanner has not run yet</div>'}</div>`;
+    const originCard = `<div class="card"><h2>Where it all came from</h2>
+      ${prov.total ? `<div class="bars">${provBars(srcRows, prov.total)}</div>` : '<div class="empty">no provenance recorded yet</div>'}</div>`;
 
     const lifetimeCard = o.lifetimeMonthly
       ? `<div class="card wide"><h2>Every month since the beginning</h2>
           ${vizLegend([['Spotify', VIZ.spotify], ['This player', VIZ.app]])}
           ${stackChart(o.lifetimeMonthly, monthLabel)}</div>`
-      : `<div class="card nudge"><h2>Unlock your lifetime</h2>
-          <p>Spotify will hand over every play you've ever made — years of history this page can't show yet.
-          Request the <b>Extended streaming history</b> at
-          <a href="https://www.spotify.com/account/privacy/" target="_blank" rel="noopener">spotify.com/account/privacy ↗</a>
-          (takes a few days to arrive), then import it with <code>src/import-history.ts</code>. This page lights up on the next visit.</p></div>`;
+      : '';
 
     return `<section class="overview-hero">
         <div>
@@ -647,11 +723,11 @@ const views = {
         <div class="card"><h2>Heavy rotation — 30 days</h2>
           ${o.topArtists.length ? `<div class="rotation">${rotation}</div>` : '<div class="empty">play something — this fills itself in</div>'}</div>
         <div class="card"><h2>Liked songs over the years</h2>${monthChart(o.likedPerMonth)}</div>
-        <div class="card"><h2>Top genres (by liked tracks)</h2>
-          ${o.genres.length ? `<div class="bars">${gbars}</div>` : '<div class="empty">genres still hydrating — check back after the next sync</div>'}</div>
+        ${fidelityCard}
+        ${originCard}
         ${lifetimeCard}
       </div>
-      ${s.releases?.length ? `<h2>New & upcoming from artists you follow (last 90 days)</h2><div class="grid">${s.releases.map(albumCell).join('')}</div>` : ''}`;
+      ${s.releases?.length ? `<h2>New & upcoming from artists you follow (last 90 days)</h2><div class="al-grid">${s.releases.map((r) => albumCell(r)).join('')}</div>` : ''}`;
   },
 
   async artists() {
@@ -682,17 +758,46 @@ const views = {
   async albums() {
     const saved = await api('/api/albums');
     return `<div class="tools"><input type="search" id="q" placeholder="search albums…"></div>
-      ${saved.length ? `<h2>Saved (${saved.length})</h2><div class="grid" id="savedOut"></div>` : ''}
-      <h2>All albums</h2><div class="grid" id="allOut"></div>
+      ${saved.length ? `<h2>Saved (${saved.length})</h2><div class="al-grid" id="savedOut"></div>` : ''}
+      <h2>All albums</h2><div class="al-grid" id="allOut"></div>
       <div style="text-align:center;margin-top:1rem"><button class="spbtn" id="more">load more</button></div>`;
   },
 
+  // Playlists as a shelf, not a switcher: each card wears a collage of the
+  // covers inside it, and the songs live on a detail page of their own.
   async playlists() {
     const pls = await api('/api/playlists');
     if (!pls.length) return '<div class="empty">no playlists synced yet</div>';
-    return `<div class="tools"><div class="seg" id="plseg">${pls.map((p, i) =>
-        `<button data-id="${p.id}" class="${i === 0 ? 'on' : ''}">${esc(p.name)}${p.removed_at ? ' †' : ''} <span style="opacity:.6">${p.synced_tracks}</span></button>`).join('')}</div></div>
-      <div class="rows" id="out"><div class="empty">loading…</div></div>`;
+    const card = (p) => {
+      const art = (p.images ?? []).slice(0, 4);
+      const collage = art.length
+        ? `<span class="pl-collage n${art.length}">${art.map((u) => `<img src="${esc(u)}" alt="" loading="lazy">`).join('')}</span>`
+        : `<span class="pl-collage empty-collage"><span class="ph">${esc((p.name || '?')[0])}</span></span>`;
+      return `<div class="al-card pl-card${p.removed_at ? ' gone' : ''}">
+        <a class="al-art" href="#playlist/${p.id}">${collage}</a>
+        <div class="al-body">
+          <b><a href="#playlist/${p.id}">${esc(p.name)}</a></b>
+          <span class="sub">${p.synced_tracks ?? p.total_tracks ?? 0} songs${p.owner_name ? ` · ${esc(p.owner_name)}` : ''}</span>
+          ${p.removed_at ? `<span class="sub dim">removed ${day(p.removed_at)}</span>` : (p.description ? `<span class="sub dim">${esc(p.description)}</span>` : '')}
+        </div>
+      </div>`;
+    };
+    return `<div class="al-grid pl-grid">${pls.map(card).join('')}</div>`;
+  },
+
+  async playlist(id) {
+    const [pls, rows] = await Promise.all([
+      api('/api/playlists'),
+      fetch(`/api/playlist-tracks?id=${id}`).then((r) => r.json()),
+    ]);
+    const meta = pls.find((p) => p.id === id);
+    const head = meta
+      ? `<div class="pl-head"><h1>${esc(meta.name)}</h1>
+          <div class="meta">${rows.length} songs${meta.owner_name ? ` · by ${esc(meta.owner_name)}` : ''}${meta.removed_at ? ` · removed ${day(meta.removed_at)}` : ''}</div>
+          ${meta.description ? `<p class="note">${esc(meta.description)}</p>` : ''}</div>`
+      : '';
+    return `${head}<div class="rows">${rows.map((t) => trackRow(t, `${day(t.added_at)}<br>${dur(t.duration_ms)}`, t.position)).join('')
+      || '<div class="empty">empty (or blocked by the API — see README)</div>'}</div>`;
   },
 
   async top() {
@@ -724,22 +829,8 @@ const views = {
   async latest() {
     const rows = await api('/api/latest');
     if (!rows.length) return '<div class="empty">nothing downloaded yet — or the archive is asleep</div>';
-    const label = { download: 'downloaded', imported: 'imported here', single: 'single' };
     return `<p class="note">Newest arrivals in the local library, by when the files landed.</p>
-      <div class="song-grid">${rows.map((row) => {
-        const href = row.album_id ? `#album/${row.album_id}` : null;
-        return `<div class="song-card">
-          <span class="song-spacer"></span>
-          ${href ? `<a href="${href}">` : ''}${pic('albums', row.album_id, row.image_url, row.name)}${href ? '</a>' : ''}
-          <div class="song-main">
-            <b>${href ? `<a href="${href}">${esc(row.name)}</a>` : esc(row.name)}</b>
-            <span class="song-sub">${esc(row.artists ?? '')}</span>
-            <span class="song-album">${DL} ${label[row.kind] ?? row.kind}</span>
-          </div>
-          ${mediaBadges(row)}
-          <div class="song-end"><span class="song-dur">${ago(row.added_at)}</span></div>
-        </div>`;
-      }).join('')}</div>`;
+      <div class="al-grid">${rows.map((row) => albumCell(row, ago(row.added_at))).join('')}</div>`;
   },
 
   async shows() {
@@ -756,36 +847,7 @@ const views = {
     const d = await (await fetch('/api/upgrades', { cache: 'no-store' })).json();
     const active = ['pending_source', 'queued', 'working', 'retry_wait'].reduce((n, k) => n + Number(d.counts?.[k] ?? 0), 0);
     const finished = Number(d.counts?.upgraded ?? 0) + Number(d.counts?.already_lossless ?? 0);
-    const statusLabel = {
-      pending_source: 'downloading MP3', queued: 'ready for Soulseek', working: 'working now',
-      retry_wait: 'retry scheduled', upgraded: 'upgraded', already_lossless: 'already lossless',
-      exhausted: 'retries exhausted', cancelled: 'cancelled',
-    };
-    const rows = (d.jobs ?? []).map((j) => {
-      const batch = j.source_mode && j.source_mode !== 'single';
-      const due = j.next_attempt_at && ['retry_wait', 'queued', 'pending_source'].includes(j.status)
-        ? ` &middot; ${j.status === 'retry_wait' ? 'retry ' : ''}${until(j.next_attempt_at)}` : '';
-      const tries = batch && j.status === 'upgraded'
-        ? `${j.batch_size ?? 0} tracks imported and queued for FLAC`
-        : j.phase === 'source' ? `${j.source_attempts}/3 source tries` : `${j.upgrade_attempts}/${j.max_attempts} FLAC tries`;
-      // Anything stalled or finished badly can be pushed again; anything
-      // that finished at all can be forgotten so it can be re-grabbed clean.
-      const canRetry = ['retry_wait', 'exhausted', 'cancelled'].includes(j.status);
-      const canCancel = ['pending_source', 'queued', 'retry_wait'].includes(j.status);
-      const canRemove = ['upgraded', 'already_lossless', 'exhausted', 'cancelled'].includes(j.status);
-      const controls = [
-        canRetry ? `<button type="button" data-upgrade-retry="${j.id}">Retry now</button>` : '',
-        canCancel ? `<button type="button" data-upgrade-cancel="${j.id}">Cancel</button>` : '',
-        canRemove ? `<button type="button" class="danger" data-upgrade-remove="${j.id}">Remove</button>` : '',
-      ].join('');
-      return `<div class="upgrade-row">
-        <span class="upgrade-state ${esc(j.status)}">${esc(batch && j.status === 'upgraded' ? 'album imported' : statusLabel[j.status] ?? j.status)}</span>
-        <div class="mid"><b>${esc(j.title)}</b><span>${esc(j.artist)}${j.album ? ` &middot; ${esc(j.album)}` : ''}</span>
-          <small>${j.track_number ? `track ${j.track_number} &middot; ` : ''}${batch ? `${esc(j.source_mode)} &middot; ` : ''}${tries}${due}${j.current_codec ? ` &middot; now ${esc(j.current_codec.toUpperCase())}` : ''}</small>
-          ${j.last_error ? `<em>${esc(j.last_error)}</em>` : ''}</div>
-        <div class="upgrade-actions">${controls}</div>
-      </div>`;
-    }).join('');
+    const rows = (d.jobs ?? []).map(upgradeCard).join('');
     return `<div class="upgrade-intro">
         <div><span class="eyebrow">Lossy now, lossless later</span><h2>Feed the archive today. Let FLAC catch up.</h2>
           <p>On the next worker sweep, a source link becomes an MP3; later Soulseek sweeps replace it only after codec, duration, artist and title checks pass.</p></div>
@@ -805,7 +867,8 @@ const views = {
         <button class="primary-action" type="submit">Add to archive + FLAC queue</button>
       </form>
       <div class="note" id="upgrade-source-note">Spotify tracks already known to this archive fill their own metadata. For a new Spotify or YouTube link, enter artist/title. YouTube album modes require artist + album and refuse partial playlists or videos without at least two valid chapters.</div>
-      <h2>Upgrade queue</h2><div class="upgrade-list">${rows || '<div class="empty">nothing queued yet</div>'}</div>`;
+      <h2>Upgrade queue <i class="spin" id="upgrade-refreshing" hidden></i></h2>
+      <div class="upgrade-list" id="upgrade-list">${rows || '<div class="empty">nothing queued yet</div>'}</div>`;
   },
 
   async artist(id) {
@@ -822,7 +885,7 @@ const views = {
     const groups = [['album', 'Albums'], ['single', 'Singles & EPs'], ['compilation', 'Compilations']];
     const discog = groups.map(([g, title]) => {
       const rows = d.albums.filter((al) => (al.album_group ?? 'album') === g);
-      return rows.length ? `<h2>${title} (${rows.length})</h2><div class="grid">${rows.map(albumCell).join('')}</div>` : '';
+      return rows.length ? `<h2>${title} (${rows.length})</h2><div class="al-grid">${rows.map((r) => albumCell(r)).join('')}</div>` : '';
     }).join('');
     return `<div class="hero">
         ${pic('artists', a.id, a.image_url, a.name)}
@@ -834,7 +897,7 @@ const views = {
           ${spbtn('artist', a.id)} ${bcbtn(a.name, 'b')}
         </div>
       </div>
-      ${d.events?.length ? `<h2>Upcoming shows</h2><div class="gig-grid">${d.events.map((e, i) => gigCard({ ...e, artist_name: a.name, image_url: a.image_url }, i)).join('')}</div>` : ''}
+      ${d.events?.length ? `<h2>Upcoming shows</h2><div class="gig-carousel">${d.events.map((e, i) => gigCard({ ...e, artist_name: a.name, image_url: a.image_url }, i)).join('')}</div>` : ''}
       ${a.discog_synced_at ? '' : '<div class="note">full discography not crawled yet — showing what the library knows so far</div>'}
       ${discog || '<div class="empty">no albums known yet</div>'}
       ${d.liked.length ? `<h2>Liked tracks</h2><div class="rows">${d.liked.map((t) => trackRow(t, day(t.added_at))).join('')}</div>` : ''}`;
@@ -946,13 +1009,16 @@ const after = {
 
     const card = (c) => {
       const meta = [c.year, c.format, c.catno].filter(Boolean).join(' · ');
-      return `<div class="cd-card cd-${c.status}" data-id="${c.release_id}">
-        <div class="cd-art">${c.thumb_url
-          ? `<img src="${esc(c.thumb_url)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
+      // cover_url is Discogs' full-size image; thumb_url is ~150px and reads
+      // blurry the moment the card is wider than that. Thumb only as fallback.
+      const art = c.cover_url || c.thumb_url;
+      return `<div class="al-card cd-card cd-${c.status}" data-id="${c.release_id}">
+        <span class="al-art">${art
+          ? `<img src="${esc(art)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
           : `<span class="ph">${esc((c.artist || '?')[0])}</span>`}
-          <span class="cd-state">${STATUS_LABEL[c.status]}</span>
-        </div>
-        <div class="cd-body">
+          <span class="al-when cd-state">${STATUS_LABEL[c.status]}</span>
+        </span>
+        <div class="al-body">
           <b>${esc(c.title)}</b>
           <span class="sub">${esc(c.artist)}</span>
           <span class="sub dim">${esc(meta)}</span>
@@ -1122,7 +1188,7 @@ const after = {
         const needle = q.value.toLowerCase();
         savedOut.innerHTML = saved
           .filter((a) => !needle || `${a.name} ${a.artists}`.toLowerCase().includes(needle))
-          .map(albumCell).join('') || '<div class="empty">no matches</div>';
+          .map((a) => albumCell(a)).join('') || '<div class="empty">no matches</div>';
       });
     };
     const paged = pager({
@@ -1133,20 +1199,25 @@ const after = {
     q.addEventListener('input', debounce(() => { drawSaved(); paged.search(q.value); }));
     drawSaved();
   },
-  playlists(el) {
-    const seg = $('#plseg', el), out = $('#out', el);
-    const load = (id) => fetch(`/api/playlist-tracks?id=${id}`).then((r) => r.json()).then((rows) => {
-      out.innerHTML = rows.map((t) => trackRow(t, `${day(t.added_at)}<br>${dur(t.duration_ms)}`, t.position)).join('')
-        || '<div class="empty">empty (or blocked by the API — see README)</div>';
-    });
-    seg.addEventListener('click', (e) => {
-      const b = e.target.closest('button'); if (!b) return;
-      seg.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
-      load(b.dataset.id);
-    });
-    const first = seg.querySelector('button'); if (first) load(first.dataset.id);
-  },
   upgrades(el) {
+    // The queue changes by itself - the worker on eliot claims, fails and
+    // finishes jobs on its own schedule - so the list refreshes itself while
+    // the tab is open instead of showing a snapshot from page load.
+    const list = $('#upgrade-list', el);
+    const pulse = $('#upgrade-refreshing', el);
+    const refresh = async () => {
+      if (!el.isConnected) { clearInterval(timer); return; }
+      pulse.hidden = false;
+      try {
+        const d = await (await fetch('/api/upgrades', { cache: 'no-store' })).json();
+        const html = (d.jobs ?? []).map(upgradeCard).join('');
+        list.innerHTML = html || '<div class="empty">nothing queued yet</div>';
+        list.querySelectorAll('[data-tip]').forEach((n) => tipOn(n, n.dataset.tip));
+      } catch { /* transient; the next tick tries again */ }
+      pulse.hidden = true;
+    };
+    const timer = setInterval(refresh, 12_000);
+
     const post = async (path, body) => {
       const response = await fetch(path, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
@@ -1197,6 +1268,7 @@ const after = {
       // generated); the audio files themselves stay on disk.
       if (action === 'delete' && !confirm('Remove this from the queue and the library listing? The downloaded files stay on disk.')) return;
       button.disabled = true;
+      button.insertAdjacentHTML('afterbegin', '<i class="spin"></i>');
       try {
         const result = await post(`/api/upgrades/${action}`, { id });
         notice(action === 'retry' ? 'Retry queued now'
@@ -1349,11 +1421,15 @@ const after = {
         return { name: x.track_name, pct: (cum / t.plays) * 100 };
       }) : [];
       const halfIdx = curvePts.findIndex((p) => p.pct >= 50);
-      const rabbitCard = curvePts.length > 2 ? `<div class="card"><h2>The rabbit hole</h2>
+      // A one-line insight with a small curve, not a card fighting the top
+      // lists for column space - it was a near-empty block the height of a
+      // whole track list.
+      const rabbitCard = curvePts.length > 2 ? `<div class="rabbit-strip">
+        <div class="rabbit-copy"><span class="eyebrow">The rabbit hole</span>
         <p class="rabbit-line">${halfIdx >= 0
           ? `Half of everything you played is just <b>${halfIdx + 1} track${halfIdx ? 's' : ''}</b>.`
-          : `Certified explorer — your top ${curvePts.length} tracks are only <b>${curvePts.at(-1).pct.toFixed(0)}%</b> of your plays.`}</p>
-        ${rabbitChart(curvePts, halfIdx)}</div>` : '';
+          : `Certified explorer — your top ${curvePts.length} tracks are only <b>${curvePts.at(-1).pct.toFixed(0)}%</b> of your plays.`}</p></div>
+        <div class="rabbit-viz">${rabbitChart(curvePts, halfIdx)}</div></div>` : '';
 
       out.innerHTML = `
         ${podium(d.topArtists.slice(0, 3).map((a) => ({
@@ -1364,8 +1440,8 @@ const after = {
         })))}
         <div class="tiles">${tiles}</div>
         ${insightCards ? `<div class="insights">${insightCards}</div>` : ''}
+        ${rabbitCard}
         <div class="cards">
-          ${rabbitCard}
           <div class="card"><h2>Top artists</h2><div class="rows">${d.topArtists.slice(3).map(artistRow).join('')}</div></div>
           <div class="card"><h2>Top tracks</h2><div class="rows">${d.topTracks.map(trackRow2).join('')}</div></div>
           <div class="card"><h2>Top albums</h2><div class="rows">${d.topAlbums.map(albumRow).join('')}</div></div>
@@ -1469,10 +1545,15 @@ let showGen = 0;
 async function show() {
   const gen = ++showGen;
   const hash = location.hash.slice(1);
-  const detail = hash.match(/^(artist|album)\/([A-Za-z0-9-]+)$/);
+  const detail = hash.match(/^(artist|album|playlist)\/([A-Za-z0-9-]+)$/);
   const tab = detail ? null : (TABS[hash] ? hash : 'overview');
   nav.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.t === tab));
-  const copy = detail ? [detail[1] === 'artist' ? 'Artist in your archive' : 'Release in your archive', detail[1] === 'artist' ? 'Artist' : 'Album'] : PAGE_COPY[tab];
+  const DETAIL_COPY = {
+    artist: ['Artist in your archive', 'Artist'],
+    album: ['Release in your archive', 'Album'],
+    playlist: ['A hand-built path', 'Playlist'],
+  };
+  const copy = detail ? DETAIL_COPY[detail[1]] : PAGE_COPY[tab];
   $('#page-kicker').textContent = copy[0];
   $('#page-title').textContent = copy[1];
   const main = $('#main');

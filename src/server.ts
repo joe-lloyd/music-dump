@@ -818,10 +818,26 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
     return albums.map((al) => ({ ...al, tracks: tracks.filter((t) => t.album_id === al.id) }));
   },
 
-  '/api/playlists': () => query(`
-    SELECT p.id, p.name, p.description, p.owner_name, p.total_tracks, p.removed_at,
-           (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id AND pt.removed_at IS NULL) AS synced_tracks
-    FROM playlists p ORDER BY p.removed_at IS NOT NULL, p.name`),
+  '/api/playlists': () => {
+    const playlists = query(`
+      SELECT p.id, p.name, p.description, p.owner_name, p.total_tracks, p.removed_at,
+             (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id AND pt.removed_at IS NULL) AS synced_tracks
+      FROM playlists p ORDER BY p.removed_at IS NOT NULL, p.name`) as Record<string, unknown>[];
+    // Up to four distinct covers per playlist, so the shelf card can wear a
+    // collage of what is actually inside it. One indexed query per playlist
+    // beats hauling every track row over just to throw the rest away.
+    for (const playlist of playlists) {
+      playlist.images = (query(
+        `SELECT al.image_url FROM playlist_tracks pt
+           JOIN tracks t ON t.id = pt.track_id
+           JOIN albums al ON al.id = t.album_id
+         WHERE pt.playlist_id = ? AND pt.removed_at IS NULL AND al.image_url IS NOT NULL
+         GROUP BY al.image_url ORDER BY MIN(pt.position) LIMIT 4`,
+        String(playlist.id),
+      ) as { image_url: string }[]).map((row) => row.image_url);
+    }
+    return playlists;
+  },
 
   '/api/playlist-tracks': (params) => query(`
     SELECT pt.position, pt.added_at, pt.removed_at, t.id, t.name, t.duration_ms,

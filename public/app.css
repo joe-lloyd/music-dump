@@ -731,8 +731,8 @@ label.chk input { accent-color: var(--accent); }
   white-space: nowrap;
 }
 
-.row .mid > div:first-child { font-size: 11px; font-weight: 630; }
-.row .mid .sub { color: var(--ink-3); font-size: 9px; font-weight: 450; }
+.row .mid > div:first-child { font-size: 13px; font-weight: 630; }
+.row .mid .sub { color: var(--ink-3); font-size: 10.5px; font-weight: 450; }
 
 .row .end,
 .rank {
@@ -784,9 +784,11 @@ label.chk input { accent-color: var(--accent); }
 
 .hero {
   display: grid;
-  grid-template-columns: clamp(170px, 24vw, 260px) minmax(0, 1fr);
-  gap: clamp(24px, 4vw, 48px);
-  align-items: end;
+  grid-template-columns: clamp(180px, 24vw, 280px) minmax(0, 1fr);
+  gap: clamp(26px, 4.5vw, 56px);
+  /* centred, not bottom-glued: with a long title the old end-alignment
+     rammed the buttons into the panel's bottom edge */
+  align-items: center;
   margin-bottom: 34px;
   padding: clamp(20px, 3vw, 34px);
   background:
@@ -799,24 +801,26 @@ label.chk input { accent-color: var(--accent); }
 .hero .pic { width: 100%; }
 
 .hero h1 {
-  margin: 0 0 10px;
-  font-size: clamp(33px, 5.4vw, 72px);
+  margin: 0 0 14px;
+  font-size: clamp(28px, 4.2vw, 54px);
   font-weight: 740;
-  line-height: .95;
-  letter-spacing: -.06em;
+  line-height: 1.02;
+  letter-spacing: -.05em;
+  overflow-wrap: anywhere;
 }
 
 .hero .meta {
-  margin-top: 6px;
+  margin-top: 8px;
   color: var(--ink-2);
-  font-size: 11px;
+  font-size: 12px;
+  line-height: 1.7;
 }
 
 .hero-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-top: 2px;
+  gap: 10px;
+  margin-top: 18px;
   flex-wrap: wrap;
 }
 
@@ -1190,6 +1194,27 @@ input[type="range"] {
   .song-card .pic { width: 40px; height: 40px; }
 }
 
+/* The rabbit hole as a strip: one line of copy beside a short curve, instead
+   of a card the height of a whole track list with nothing in it. */
+.rabbit-strip {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(0, 2fr);
+  gap: 10px 26px;
+  align-items: center;
+  margin-bottom: 12px;
+  padding: 14px 20px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--card);
+}
+
+.rabbit-strip .rabbit-line { margin: 4px 0 0; font-size: 13px; }
+.rabbit-viz svg { display: block; }
+
+@media (max-width: 760px) {
+  .rabbit-strip { grid-template-columns: 1fr; }
+}
+
 /* --- quality and source badges ------------------------------------------
    Tier is encoded three times over: filled bars, colour, and the literal
    figure. Any one of the three is enough to read it, which is what keeps it
@@ -1296,6 +1321,162 @@ input[type="range"] {
   .q-badge b { display: none; }
 }
 
+/* --- the standard album card ---------------------------------------------
+   One card for every album-shaped thing: Albums, an artist's discography,
+   Latest downloads, Overview releases, the CD shelf and playlists. Art on
+   top, then name / artist / year-and-type, then the quality and source
+   badges. The CD shelf adds its state pill and action row on top of this
+   base rather than owning a lookalike. */
+.al-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));
+  gap: 16px;
+  margin-bottom: 10px;
+}
+
+.al-card {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--card);
+  transition: border-color .16s, background .16s, transform .16s;
+}
+
+.al-card:hover {
+  border-color: var(--line-strong);
+  background: var(--card-hover);
+  transform: translateY(-2px);
+}
+
+.al-card.gone { opacity: .55; }
+
+.al-art {
+  position: relative;
+  display: block;
+  aspect-ratio: 1;
+  border-radius: 9px;
+  overflow: hidden;
+  background: var(--surface-soft);
+}
+
+.al-art img,
+.al-art .pic,
+.al-art .pic img { width: 100%; height: 100%; object-fit: cover; display: block; border-radius: 0; }
+
+.al-art .pic { position: absolute; inset: 0; aspect-ratio: auto; }
+
+.al-art .ph {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-size: 2rem;
+  font-weight: 700;
+}
+
+.al-card:hover .al-art img { filter: brightness(1.06); }
+
+/* Timestamp / state pill overlaid on the art (Latest's "2h ago", the CD
+   shelf's TO RIP). */
+.al-when {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  z-index: 1;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(10, 8, 10, .8);
+  color: var(--ink-2);
+  font-size: 9px;
+  letter-spacing: .03em;
+  backdrop-filter: blur(6px);
+  white-space: nowrap;
+}
+
+.al-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+
+.al-body b,
+.al-body .sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.al-body b { font-size: 12.5px; font-weight: 640; }
+.al-body b a:hover { color: var(--accent); text-decoration: none; }
+.al-body .sub { color: var(--ink-2); font-size: 10.5px; }
+.al-body .sub.dim { color: var(--ink-3); font-size: 9.5px; }
+.al-body .song-badges { justify-content: flex-start; margin-top: 4px; }
+.al-body .song-badges:empty { margin-top: 0; }
+.al-body .chips { margin-top: 3px; }
+.al-body .chips:empty { margin-top: 0; }
+
+/* Playlist collage: up to four covers behind one card. */
+.pl-collage {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+}
+
+.pl-collage img { width: 100%; height: 100%; object-fit: cover; }
+.pl-collage.n1 { grid-template-columns: 1fr; grid-template-rows: 1fr; }
+.pl-collage.n2 { grid-template-rows: 1fr; }
+.pl-collage.n3 img:first-child { grid-row: span 2; }
+
+.pl-collage.empty-collage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pl-head { margin-bottom: 18px; }
+.pl-head h1 { margin: 0 0 6px; font-size: clamp(26px, 4vw, 44px); letter-spacing: -.04em; }
+.pl-head .meta { color: var(--ink-2); font-size: 12px; }
+
+/* Shows on an artist page: one swipeable line instead of a grid that eats
+   the whole viewport before the discography starts. */
+.gig-carousel {
+  display: flex;
+  gap: 14px;
+  margin-bottom: 8px;
+  padding-bottom: 10px;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+}
+
+.gig-carousel > * {
+  flex: 0 0 min(320px, 82vw);
+  scroll-snap-align: start;
+}
+
+/* A small activity spinner, used by the FLAC queue. */
+.spin {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border: 1.6px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  vertical-align: -1px;
+  animation: spin .8s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .spin { animation-duration: 2.4s; }
+  .al-card:hover { transform: none; }
+}
+
 /* --- CD shelf ------------------------------------------------------------
    Cards rather than rows: a disc is identified as much by its sleeve as by
    its title, and the whole point of the page is scanning for what to rip
@@ -1325,22 +1506,9 @@ input[type="range"] {
 
 .cd-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(178px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));
   gap: 16px;
 }
-
-.cd-card {
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: var(--card);
-  transition: border-color .16s, background .16s;
-}
-
-.cd-card:hover { border-color: var(--line-strong); background: var(--card-hover); }
 
 /* Ripped is the finished state: still findable, no longer competing for
    attention with the discs that still need doing. */
@@ -1348,56 +1516,9 @@ input[type="range"] {
 .cd-skip { opacity: .4; }
 .cd-ripping { border-color: rgba(255, 87, 217, .3); }
 
-.cd-art {
-  position: relative;
-  aspect-ratio: 1;
-  border-radius: 9px;
-  overflow: hidden;
-  background: var(--surface-soft);
-}
-
-.cd-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
-
-.cd-art .ph {
-  display: flex;
-  width: 100%;
-  height: 100%;
-  align-items: center;
-  justify-content: center;
-  color: var(--accent);
-  background: var(--accent-soft);
-  font-size: 2rem;
-  font-weight: 700;
-}
-
-.cd-state {
-  position: absolute;
-  right: 6px;
-  bottom: 6px;
-  padding: 2px 7px;
-  border-radius: 999px;
-  background: rgba(10, 8, 10, .8);
-  color: var(--ink-2);
-  font-size: 8.5px;
-  letter-spacing: .04em;
-  text-transform: uppercase;
-  backdrop-filter: blur(6px);
-}
+.cd-state { text-transform: uppercase; font-size: 8.5px; letter-spacing: .05em; }
 
 .cd-ripped .cd-state { color: var(--accent); }
-
-.cd-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-
-.cd-body b,
-.cd-body .sub {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.cd-body b { font-size: 11.5px; font-weight: 630; }
-.cd-body .sub { color: var(--ink-2); font-size: 10px; }
-.cd-body .sub.dim { color: var(--ink-3); font-size: 9px; }
 
 .cd-actions { display: flex; gap: 5px; }
 
@@ -1895,24 +2016,71 @@ input[type="range"] {
 }
 .upgrade-form .primary-action { grid-column: 1 / -1; justify-self: start; margin-top: 3px; }
 
-.upgrade-list { border-top: 1px solid var(--line); }
-.upgrade-row {
+.upgrade-list {
   display: grid;
-  grid-template-columns: 125px minmax(0, 1fr) auto;
+  /* Cards, two or three abreast on a desktop. The old single-column rows
+     left half the viewport empty and squeezed the text to 10px. */
+  grid-template-columns: repeat(auto-fill, minmax(min(400px, 100%), 1fr));
   gap: 14px;
+}
+
+.upgrade-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--card);
+}
+
+.upgrade-card.is-working { border-color: rgba(255, 87, 217, .35); }
+.upgrade-card.is-exhausted { border-color: rgba(229, 138, 120, .3); }
+.upgrade-card.is-upgraded { opacity: .8; }
+
+.upgrade-head {
+  display: flex;
+  gap: 8px;
   align-items: center;
-  min-height: 72px;
-  padding: 12px 4px;
-  border-bottom: 1px solid var(--line);
+  justify-content: space-between;
+  margin-bottom: 2px;
 }
-.upgrade-row .mid { display: grid; min-width: 0; }
-.upgrade-row .mid b, .upgrade-row .mid span, .upgrade-row .mid small, .upgrade-row .mid em {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+
+.upgrade-state .spin { margin-right: 6px; }
+
+.upgrade-title { font-size: 14.5px; font-weight: 660; letter-spacing: -.01em; }
+.upgrade-sub { color: var(--ink-2); font-size: 11.5px; }
+
+.upgrade-tries {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  margin-top: 4px;
 }
-.upgrade-row .mid span, .upgrade-row .mid small { color: var(--ink-3); font-size: 10px; }
-.upgrade-row .mid em { margin-top: 3px; color: #e58a78; font-size: 10px; font-style: normal; }
+
+.upgrade-tries small { color: var(--ink-3); font-size: 10.5px; }
+
+.upgrade-dots { display: inline-flex; gap: 4px; }
+
+.upgrade-dots i {
+  width: 7px;
+  height: 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+}
+
+.upgrade-dots i.used { border-color: var(--accent); background: var(--accent); opacity: .8; }
+.upgrade-dots i.live { border-color: var(--accent); animation: dotlive 1s ease-in-out infinite alternate; }
+
+@keyframes dotlive { from { background: transparent; } to { background: var(--accent); } }
+
+.upgrade-error {
+  color: #e58a78;
+  font-size: 11px;
+  font-style: normal;
+  line-height: 1.5;
+}
+
 .upgrade-state {
   padding: 5px 7px;
   color: var(--ink-2);
@@ -2139,7 +2307,6 @@ input[type="range"] {
   .upgrade-intro { grid-template-columns: 1fr; gap: 16px; padding: 24px; }
   .upgrade-form { grid-template-columns: 1fr 1fr; }
   .upgrade-form label:first-child { grid-column: 1 / -1; }
-  .upgrade-row { grid-template-columns: 105px minmax(0, 1fr); gap: 8px; }
   .upgrade-actions { grid-column: 2; }
 }
 

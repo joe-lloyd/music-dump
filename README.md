@@ -185,6 +185,32 @@ Needs a personal access token from
 the tab renders setup instructions instead of failing. The token's own account
 is resolved via `/oauth/identity`, so there is no username to configure.
 
+## The standard album card
+
+Everything album-shaped renders through one card (`albumCell` /
+`.al-card`): art, name, artist, year (plus type when it isn't a plain album),
+then the quality and source badges, with an optional pill overlaid on the art
+for context like Latest's download time or the CD shelf's TO RIP state. The
+Albums grid, an artist's discography, Latest downloads, the Overview's new
+releases, playlists and the CD shelf all wear it, so the library reads the
+same wherever an album appears. The CD shelf *extends* the base card with its
+state pill and action row rather than owning a lookalike — if the card
+changes, everything changes together.
+
+Related unification notes:
+
+- The CD shelf uses Discogs' `cover_image`, not `thumb` — the thumb is ~150px
+  and reads blurry the moment the card is wider than that.
+- Playlists are a shelf of cards, each wearing a collage of up to four covers
+  from inside it (`/api/playlists` returns `images`), with the songs on a
+  `#playlist/<id>` detail page.
+- The FLAC queue renders as multi-column cards with the attempt budget as
+  dots, a spinner on working jobs, and a 12-second live refresh while the tab
+  is open — the worker changes the queue on its own schedule, so a page-load
+  snapshot was always stale.
+- The Top page's rabbit hole is a one-line strip with a small curve rather
+  than a card the height of a whole track list.
+
 ## MP3/album intake and automatic FLAC upgrades
 
 The **FLAC queue** tab closes the gap between "I want this song now" and "a
