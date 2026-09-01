@@ -1585,11 +1585,20 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(400).end();
         return;
       }
-      for (const name of ['cover.jpg', 'folder.jpg', 'cover.png', 'folder.png']) {
+      // A `rel` can name a directory (an album) or a single audio file, since
+      // singles live loose in _Singles/<Artist>/ rather than getting a folder
+      // of their own. For a file, the art is a sidecar named after it — a
+      // folder cover would be wrong there, because one folder holds every
+      // single by that artist.
+      const stem = path.join(path.dirname(dir), path.parse(dir).name);
+      const candidates = AUDIO_EXT.has(path.extname(dir).toLowerCase())
+        ? [`${stem}.jpg`, `${stem}.png`, path.join(path.dirname(dir), 'cover.jpg')]
+        : ['cover.jpg', 'folder.jpg', 'cover.png', 'folder.png'].map((n) => path.join(dir, n));
+      for (const file of candidates) {
         try {
-          const body = readFileSync(path.join(dir, name));
+          const body = readFileSync(file);
           res.writeHead(200, {
-            'content-type': name.endsWith('.png') ? 'image/png' : 'image/jpeg',
+            'content-type': file.endsWith('.png') ? 'image/png' : 'image/jpeg',
             'cache-control': 'public, max-age=86400',
           });
           res.end(body);
