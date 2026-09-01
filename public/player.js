@@ -20,6 +20,7 @@
   const byline = document.querySelector('#player-byline');
   const overline = document.querySelector('#player-overline');
   const art = document.querySelector('#player-art');
+  const artLink = document.querySelector('#player-art-link');
   const artFallback = document.querySelector('#player-art-fallback');
   const queueButton = document.querySelector('#queue-button');
   const queuePanel = document.querySelector('#queue-panel');
@@ -185,6 +186,42 @@
     queueIndex = Math.max(0, queue.findIndex((item) => item.id === selectedId));
     renderQueue();
     save();
+  };
+
+  /**
+   * Mark the playing track wherever it appears on the page.
+   *
+   * Driven from the player rather than by re-rendering a view: the player
+   * outlives navigation, and one track can be visible on several surfaces at
+   * once. Re-applied whenever a view is replaced.
+   */
+  let nowPlayingId = null;
+  const markNowPlaying = (trackId) => {
+    if (trackId) nowPlayingId = trackId;
+    document.querySelectorAll('[data-track-id].playing, [data-track-id].paused')
+      .forEach((el) => el.classList.remove('playing', 'paused'));
+    if (!nowPlayingId) return;
+    const state = audio && !audio.paused ? 'playing' : 'paused';
+    document.querySelectorAll(`[data-track-id="${CSS.escape(nowPlayingId)}"]`)
+      .forEach((el) => el.classList.add(state));
+  };
+  document.addEventListener('music:rendered', () => markNowPlaying());
+
+  // Title, artist and a LINK to the album. Every album in the library has a
+  // page now, so there is always somewhere for it to go.
+  const setNowPlayingCopy = (track) => {
+    title.textContent = track.name;
+    const albumId = track.album_id || track.albumId || '';
+    const href = albumId ? `#album/${encodeURIComponent(albumId)}` : '';
+    byline.innerHTML = [
+      track.artists ? escapeHtml(track.artists) : '',
+      track.album
+        ? (href ? `<a class="player-album" href="${href}">${escapeHtml(track.album)}</a>` : escapeHtml(track.album))
+        : '',
+    ].filter(Boolean).join(' · ');
+    artLink.href = href || '#';
+    artLink.classList.toggle('linked', Boolean(href));
+    markNowPlaying(track.id);
   };
 
   const setArtwork = (track) => {
@@ -412,8 +449,7 @@
         durationMs: current.duration_ms || queue[index].durationMs,
       };
       pendingTrackId = null;
-      title.textContent = current.name;
-      byline.textContent = [current.artists, current.album].filter(Boolean).join(' · ');
+      setNowPlayingCopy(current);
       overline.textContent = 'Local archive · Jellyfin';
       setArtwork(current);
       updateMediaSession(current);
@@ -471,8 +507,7 @@
       pendingTrackId = null;
       prefetch = null;
       bar.dataset.state = 'loading';
-      title.textContent = current.name;
-      byline.textContent = [current.artists, current.album].filter(Boolean).join(' · ');
+      setNowPlayingCopy(current);
       overline.textContent = 'Local archive · Jellyfin';
       setArtwork(current);
       updateMediaSession(current);
@@ -570,6 +605,11 @@
   // restoring the saved position, and x^2 / sqrt(x) is exactly invertible.
   const gainFor = (position) => Math.max(0, Math.min(1, Number(position))) ** 2;
   const positionFor = (gain) => Math.sqrt(Math.max(0, Math.min(1, Number(gain))));
+
+  for (const event of ['play', 'pause']) {
+    audioA.addEventListener(event, () => markNowPlaying());
+    audioB.addEventListener(event, () => markNowPlaying());
+  }
 
   volume.addEventListener('input', () => {
     audioA.volume = audioB.volume = gainFor(volume.value);

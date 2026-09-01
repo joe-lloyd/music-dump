@@ -162,7 +162,7 @@
 <section class="player-bar" id="player-bar" data-state="idle" aria-label="Music player">
   <audio id="audio" preload="metadata"></audio>
   <div class="player-track">
-    <div class="player-art"><img id="player-art" alt=""><span id="player-art-fallback">MT</span></div>
+    <a class="player-art" id="player-art-link" href="#"><img id="player-art" alt=""><span id="player-art-fallback">MT</span></a>
     <div class="player-copy">
       <span class="player-overline" id="player-overline">Local archive</span>
       <b id="player-title">Choose a track</b>
@@ -1619,6 +1619,8 @@ async function show() {
     if (!detail) after[tab]?.(main);
     scrollTo(0, 0);
     main.querySelectorAll('[data-tip]').forEach((el) => tipOn(el, el.dataset.tip));
+    // A fresh view has no idea what is playing; the player re-marks it.
+    document.dispatchEvent(new CustomEvent('music:rendered'));
   } catch (err) {
     clearTimeout(skeletonTimer);
     if (gen !== showGen) return;

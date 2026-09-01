@@ -293,6 +293,47 @@ test('installed files become local library tracks and albums, whatever the upgra
   }
 });
 
+test('two queue rows for one file are one track, keeping the album context', () => {
+  const { store, close } = fixture();
+  try {
+    // How this happens for real: an album import creates the track with its
+    // number, then re-queuing the same song adds a bare second row.
+    const parent = store.create({
+      sourceUrl: 'https://youtu.be/abc', artist: 'Igorrr', title: 'Maigre',
+      album: 'Maigre', sourceMode: 'chapters', downloader: 'yt-dlp',
+    });
+    const claimed = store.claim('worker')!;
+    store.finishBatch({
+      id: parent.id,
+      claimToken: claimed.claim_token!,
+      resultPath: '/data/library/music/_YouTube/Igorrr/Maigre',
+      tracks: [{
+        sourceUrl: 'https://youtu.be/abc', artist: 'Igorrr', album: 'Maigre',
+        title: 'Barbecue', trackNumber: 1, durationMs: 100_000,
+        currentPath: '/data/library/music/_YouTube/Igorrr/Maigre/01 - Barbecue.opus',
+        currentCodec: 'opus',
+      }, {
+        sourceUrl: 'https://youtu.be/abc', artist: 'Igorrr', album: 'Maigre',
+        title: 'Cuisse', trackNumber: 3, durationMs: 100_000,
+        currentPath: '/data/library/music/_YouTube/Igorrr/Maigre/03 - Cuisse.opus',
+        currentCodec: 'opus',
+      }],
+    });
+    store.create({
+      sourceUrl: 'https://youtu.be/abc', artist: 'Igorrr', title: 'Cuisse',
+      album: 'Maigre',
+      currentPath: '/data/library/music/_YouTube/Igorrr/Maigre/03 - Cuisse.opus',
+      currentCodec: 'opus',
+    });
+
+    const tracks = store.localTracks().filter((track) => track.name === 'Cuisse');
+    assert.equal(tracks.length, 1, 'one file is one track');
+    assert.equal(tracks[0].track_number, 3, 'the row with album context wins');
+  } finally {
+    close();
+  }
+});
+
 test('removing a batch parent forgets its generated tracks and reports their files', () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'remove-'));
   const store = new UpgradeStore(path.join(dir, 'upgrades.db'));

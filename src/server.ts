@@ -36,6 +36,8 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 // Where this container sees the music library that the worker writes to.
 // Empty disables file-based cover lookup and leaves only the Jellyfin path.
 const APP_LIBRARY_PREFIX = process.env.APP_LIBRARY_PREFIX ?? '/music';
+// Where Jellyfin serves the same library from; mirrors jellyfin.ts.
+const JELLYFIN_PREFIX = process.env.JELLYFIN_LIBRARY_PREFIX ?? '/eliot-media/music';
 const jellyfin = new JellyfinBridge();
 const lyrics = new LyricsService();
 const appPlays = new PlaysStore();
@@ -220,6 +222,22 @@ function findCover(startDir: string): { file: string; type: string } | null {
     dir = path.dirname(dir);
   }
   return null;
+}
+
+/**
+ * A library path as the WORKER spells it.
+ *
+ * Jellyfin serves the same tree from its own mount, so the same file has two
+ * names depending on who is asked. The queue and the provenance store both
+ * key on the worker's, so anything coming back from Jellyfin is translated
+ * before it is stored.
+ */
+function workerPath(value: string | null): string | null {
+  if (!value) return null;
+  const normalized = value.replace(/\\/g, '/');
+  return normalized.startsWith(JELLYFIN_PREFIX + '/')
+    ? LOCAL_LIBRARY_PREFIX + normalized.slice(JELLYFIN_PREFIX.length)
+    : normalized;
 }
 
 /** Library-relative path, for the folder-art endpoint. */
@@ -1412,7 +1430,11 @@ const server = http.createServer(async (req, res) => {
           title: isBatch ? album : title,
           album,
           durationMs: track?.duration_ms ?? (Number(body.durationMs ?? 0) || null),
-          currentPath: match?.path ?? null,
+          // Jellyfin answers with ITS mount (/eliot-media/music/...); the
+          // queue speaks the worker's (/data/library/music/...). Storing the
+          // raw answer made a re-queue look like a different file, which is
+          // how one album ended up with duplicate tracks.
+          currentPath: workerPath(match?.path ?? null),
           currentCodec: match?.container ?? null,
           maxAttempts: Number(body.maxAttempts ?? 6),
         });

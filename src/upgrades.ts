@@ -350,7 +350,18 @@ export class UpgradeStore {
         path: String(r.current_path ?? ''),
         added_at: String(r.created_at ?? ''),
       };
-    });
+    })
+      // One file is one track. Two queue rows can legitimately point at the
+      // same path - re-queuing an existing track is the ordinary way to get
+      // one - and without this the album shows it twice. The row carrying
+      // track/disc context wins, because that is the one an album import
+      // created; a bare re-queue has neither.
+      .reduce((keep: LocalTrack[], track) => {
+        const seen = keep.findIndex((other) => other.path === track.path);
+        if (seen < 0) keep.push(track);
+        else if (keep[seen].track_number == null && track.track_number != null) keep[seen] = track;
+        return keep;
+      }, []);
   }
 
   // Distinct artists whose music actually landed on disk.

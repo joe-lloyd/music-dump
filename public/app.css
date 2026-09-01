@@ -1070,6 +1070,61 @@ input[type="range"] {
 
 /* Queue rows carry the same cover as the page they were queued from; the
    letter behind it shows through when there is no art. */
+/* --- now playing -------------------------------------------------------
+   The row for the playing track, wherever it appears. Colour alone would be
+   easy to miss in a long tracklist, so the play button also animates - and
+   the animation is what distinguishes playing from paused. */
+[data-track-id].playing,
+[data-track-id].paused { color: var(--accent); }
+
+.track-play.playing,
+.track-play.paused {
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.track-play.playing svg { display: none; }
+
+/* Three bars stepping like a level meter: unmistakably "this one, now". */
+.track-play.playing::after,
+.track-play.paused::after {
+  content: '';
+  width: 11px;
+  height: 11px;
+  background:
+    linear-gradient(currentColor, currentColor) 0 100% / 3px 100% no-repeat,
+    linear-gradient(currentColor, currentColor) 4px 100% / 3px 60% no-repeat,
+    linear-gradient(currentColor, currentColor) 8px 100% / 3px 85% no-repeat;
+}
+
+.track-play.playing::after { animation: eq .9s ease-in-out infinite alternate; }
+
+@keyframes eq {
+  from { background-size: 3px 35%, 3px 100%, 3px 55%; }
+  to { background-size: 3px 100%, 3px 45%, 3px 90%; }
+}
+
+/* Paused keeps the bars but holds them still, so the state is readable
+   without waiting to see whether anything moves. */
+.track-play.paused::after { opacity: .6; }
+
+.row.playing,
+.row.paused,
+.song-card.playing,
+.song-card.paused { background: var(--accent-soft); }
+
+@media (prefers-reduced-motion: reduce) {
+  .track-play.playing::after { animation: none; }
+}
+
+/* The player bar's art and album name both open the album. */
+.player-art.linked { cursor: pointer; }
+.player-art.linked:hover img { filter: brightness(1.12); }
+
+.player-album { color: inherit; }
+.player-album:hover { color: var(--accent); text-decoration: underline; }
+
 .queue-art {
   position: relative;
   display: grid;
