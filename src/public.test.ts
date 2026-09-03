@@ -23,10 +23,14 @@ function inlineScripts(html: string): string[] {
     .filter((body) => body.trim().length > 0);
 }
 
-test('every inline script in index.html parses', () => {
+test('any inline script in index.html parses', () => {
   const html = readFileSync(path.join(PUBLIC, 'index.html'), 'utf8');
   const scripts = inlineScripts(html);
-  assert.ok(scripts.length > 0, 'expected at least one inline script');
+  // No longer requires that one exists. The UI is now built from TypeScript
+  // sources, so the document is a shell with a single <script src>, and the
+  // redeclaration SyntaxError this test was written for is caught by tsc and
+  // the bundler long before a file is written. The loop stays because an
+  // inline script could be reintroduced -- and if it is, it still gets checked.
   for (const [index, body] of scripts.entries()) {
     // Compiling without running catches syntax and redeclaration errors while
     // leaving the DOM calls in the body untouched.
@@ -50,13 +54,19 @@ test('every shipped javascript file parses', () => {
 // (see the comment on body.nav-open .nav-backdrop). The back button is the
 // same shape - display:inline-flex, shown and hidden by the router through
 // the attribute - so it needs its guard kept.
-test('the back button stays hidden when the router hides it', () => {
+test('the back button has a rule that beats its own display', () => {
   const css = readFileSync(path.join(PUBLIC, 'app.css'), 'utf8');
-  const html = readFileSync(path.join(PUBLIC, 'index.html'), 'utf8');
-  assert.match(html, /id="page-back"[^>]*\shidden/, 'the back button must ship hidden');
   assert.match(css, /\.page-back\[hidden\]\s*\{[^}]*display:\s*none/,
     '.page-back sets a display, so it needs an explicit [hidden] rule to beat it');
 });
+
+// The other half of that assertion -- that the button ships hidden -- used to
+// be checked here by grepping index.html. It cannot be, any more: React
+// creates the button from the bundle, so it is never in the served document.
+// This does not "come back once the port lands"; the assertion belongs in a
+// component test in music-ui, next to the component that renders it. Recorded
+// as todo rather than deleted so the coverage is owed to someone.
+test('the back button ships hidden', { todo: 'moves to a music-ui component test with the shell port' }, () => {});
 
 test('the manifest and any JSON assets are valid JSON', () => {
   for (const name of readdirSync(PUBLIC).filter((file) => file.endsWith('.webmanifest') || file.endsWith('.json'))) {
