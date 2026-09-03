@@ -127,8 +127,9 @@ prefetch window, the player appends another **whole local album**:
 
 Genre similarity and personal-affinity tie-breaking use metadata already in
 `spotify.db`; album/track availability comes only from `provenance.db`. The
-existing MusicBrainz ids remain the durable identity used by Lidarr and radio,
-but no MusicBrainz or ListenBrainz request is made at an album boundary:
+existing MusicBrainz ids remain the durable identity used by the library
+manager and radio, but no MusicBrainz or ListenBrainz request is made at an
+album boundary:
 MusicBrainz is not an audio-energy database, and putting a public request there
 would add both latency and a new failure mode to playback. The visited-album
 history is persisted and bounded, completed queue rows are trimmed after 500
@@ -149,8 +150,8 @@ no-matches stay quiet.
 
 Every track row carries two badges: what fidelity the file actually is, and
 which pipeline produced it. `src/provenance.ts` holds the model, a scanner on
-eliot (`HomeLab: eliot/acquisition/music-upgrader/library_scan.py`) fills it,
-and `data/provenance.db` stores one row per audio file.
+the library host fills it, and `data/provenance.db` stores one row per audio
+file.
 
 **Quality tiers.** Lossless is decided by codec alone — a FLAC's nominal
 bitrate describes the music, not the fidelity, so it never reaches the lossy
@@ -161,7 +162,7 @@ out. Lossy files fall on bitrate:
 |---|---|---|
 | `hires` | lossless, ≥24-bit or >48 kHz | 1,869 files, mostly modern WEB-FLAC |
 | `lossless` | FLAC / ALAC / WAV / APE | the bulk of the library |
-| `high` | ≥256 kbps | MP3-320 and AAC-256 from usenet |
+| `high` | ≥256 kbps | MP3-320 and AAC-256 |
 | `standard` | ≥96 kbps | YouTube's best Opus stream (itag 251) |
 | `low` | <96 kbps | YouTube fallback streams, old MP3s |
 
@@ -174,9 +175,10 @@ The badge encodes the tier three ways at once — filled bars, colour, and the
 literal figure — so it stays readable at 9 px and does not depend on telling
 magenta from gold.
 
-**Sources.** `youtube`, `cd`, `usenet`, `torrent`, `soulseek`, `unknown`. The
-usenet/torrent split is an exact join through Lidarr's history rather than a
-guess; the indexer name rides along in the tooltip.
+**Sources.** Every scanned file also records which import path produced it, so
+a row can say where its bytes came from instead of leaving you to guess. The
+distinction between paths is an exact join through the library manager's import
+history rather than a heuristic.
 
 **How rows get badged.** Provenance is recorded per *file path*, but the Songs
 page renders Spotify track rows that have no path. Resolving those through
@@ -199,8 +201,8 @@ scanned file simply comes back unbadged.
 Every album the library physically holds has a page, plays, and is reachable —
 whether Spotify has ever heard of it or not. Before this, an album's id came
 only from the taste DB, so roughly a third of the newest downloads had no
-cover, no link, and nowhere to go: usenet and Soulseek grabs of records Spotify
-does not carry were invisible to the app that downloaded them.
+cover, no link, and nowhere to go: records Spotify does not carry were
+invisible to the app that manages them.
 
 The library's own catalogue comes from the provenance scanner:
 
@@ -327,7 +329,7 @@ verified lossless copy exists somewhere":
    or yt-dlp (YouTube) if Jellyfin does not already have a local file. YouTube
    playlists are imported in playlist order; long videos use yt-dlp's internal
    chapters. Each generated track becomes its own durable FLAC job. The worker
-   then searches Soulseek through slskd for FLAC candidates.
+   then searches its configured source for FLAC candidates.
 4. A replacement is accepted only when ffprobe confirms the codec is actually
    FLAC and duration + artist + title match. The FLAC is copied and verified on
    the library filesystem before the old lossy file is moved to the recoverable
@@ -335,7 +337,7 @@ verified lossless copy exists somewhere":
 
 Upgrade failures retry with exponential backoff (six hours up to seven days),
 +/-25% jitter, and a random pick among due failures. `maxAttempts` defaults to 6
-and is capped at 20. Attempted Soulseek files are remembered so a bad candidate
+and is capped at 20. Attempted candidate files are remembered so a bad one
 is not selected repeatedly. Exhausted items stay visible and **Retry now** grants
 another attempt. Source downloads have their own three-attempt budget.
 
@@ -343,8 +345,8 @@ Worker mutation endpoints (`/api/upgrades/claim` and `/api/upgrades/complete`)
 require a shared random `UPGRADE_WORKER_TOKEN` of at least 16 characters. Queue
 creation never exposes that token to the browser. Source URLs are restricted to
 HTTPS Spotify and YouTube hosts and all downloader commands use argument arrays,
-not a shell. See the HomeLab repository's `eliot/acquisition/music-upgrader/`
-for the worker, slskd container, systemd timer, and deployment checklist.
+not a shell. The worker, its container, systemd timer and deployment
+checklist live in the private infrastructure repository, not here.
 
 Album expansion is atomic in the queue: the parent is only marked imported once
 all generated MP3s have been validated and every child upgrade row can be
@@ -401,11 +403,12 @@ Two things Spotify was still doing for this library got replaced on
 2026-09-01: telling us what our artists are releasing, and suggesting music we
 do not own. Neither answer comes from Spotify any more.
 
-### New & upcoming comes from Lidarr
+### New & upcoming comes from the library manager
 
 The overview's release grid used to be a Spotify query — albums whose artist
 carried Spotify's `is_followed` flag, discovered by crawling Spotify
-discographies. Lidarr's calendar answers the same question better:
+discographies. The library manager's calendar answers the same question
+better:
 
 - it is the artists **actually being tracked** (284, all monitored), not
   whoever Spotify thinks you follow;
@@ -414,10 +417,9 @@ discographies. Lidarr's calendar answers the same question better:
 - it knows whether the **files landed**, so a release either links to a real
   album page or wears a release date and no link.
 
-Spotify still fills gaps for artists Lidarr has never been told about, and the
-counts say how many came from each (`fromLidarr` / `fromSpotify` on
-`/api/releases`). When that second number reaches zero the Spotify half can be
-deleted outright.
+Spotify still fills gaps for artists the library manager has never been told
+about, and `/api/releases` counts how many came from each. When the Spotify
+number reaches zero that half can be deleted outright.
 
 ### Radio
 
@@ -426,11 +428,11 @@ deleted outright.
 - **LB Radio** (`explore/lb-radio`) turns a prompt into recordings. Its prompt
   language takes artists and tags, not recording ids, so a "play radio from
   this track" seed is resolved back to its artist first.
-- **Recording MBIDs are the join key.** Lidarr stamps one on every track it
-  imports, and `lidarr_recording` in the taste DB caches it against the file
-  path — so "do we own this?" is an index lookup. 9072 of 9077 recordings
-  resolved to a real file when that map was first built. Tracks Lidarr never
-  saw (the YouTube singles) fall back to artist+title.
+- **Recording MBIDs are the join key.** The library manager stamps one on
+  every track it imports, and a recording map in the taste DB caches it against
+  the file path — so "do we own this?" is an index lookup. 9072 of 9077
+  recordings resolved to a real file when that map was first built. Tracks the
+  library manager never saw fall back to artist+title.
 - **A station is a mix.** Owned tracks and unowned ones interleave, leading
   with an owned one so audio starts instantly. A station made only of music we
   lack cannot play until a download finishes, which reads as "radio is broken".
@@ -458,8 +460,9 @@ Two things it has to survive:
 - **File tags carry credits, not artists.** LB Radio resolves artists by exact
   name and answers `artist:(Bonobo & Arooj Aftab)` with a flat *400 — could not
   be looked up*, so a 2026 collaboration had no station at all. Fixed twice
-  over: Lidarr's own `artist_name`/`artist_mbid` is preferred (canonical, and
-  an MBID gives a wider net than a name — 34 distinct artists vs 28), and if
+  over: the library manager's own `artist_name`/`artist_mbid` is preferred
+  (canonical, and an MBID gives a wider net than a name — 34 distinct artists
+  vs 28), and if
   only a tag is available the full credit is tried **first**, reducing to the
   lead artist only when ListenBrainz rejects it. That ordering is what keeps
   "Simon & Garfunkel" and "AC/DC" intact — they resolve, so they are never cut.
@@ -498,7 +501,7 @@ different treatment:
 | pressed play on it | YouTube single | yes |
 | FLAC↑ on a radio track | (already on disk) | yes |
 
-Every imported single used to enter the Soulseek FLAC queue automatically. One
+Every imported single used to enter the FLAC upgrade queue automatically. One
 evening of stations put **100 tracks** into it — passive listening had become a
 download campaign for music nobody chose. Now a discovered track lands
 playable and stops there, as a *parked* job: file on disk, nothing hunting for
@@ -516,15 +519,15 @@ file and starts playback itself when it lands.
 That last part is aimed squarely at the Spotify liked-songs list: press play on
 anything in it and the track is fetched, played, and queued for a real copy.
 
-**This path does not go through Lidarr.** It is deliberately the short one —
-app queue → worker → yt-dlp → `_Singles/<Artist>/<Title>.opus` — because radio
-needs a file within a song's length, and the Lidarr route (indexer search →
-qBittorrent or SABnzbd → import) takes minutes to hours and works in whole
-releases rather than single tracks. The cost is that radio discoveries land as
-standard-quality YouTube singles, tagged `source=youtube`, not proper releases.
-Promoting one you liked into a real lossless copy means adding the artist or
-album to Lidarr, which is not yet wired up. Fetching the whole
-station up front would pull 38 albums for a station abandoned after two songs.
+**This path is deliberately the short one** — app queue → worker → yt-dlp →
+`_Singles/<Artist>/<Title>.opus` — because radio needs a file within a song's
+length, while the library manager's normal route takes minutes to hours and
+works in whole releases rather than single tracks. The cost is that radio
+discoveries land as standard-quality YouTube singles, tagged `source=youtube`,
+not proper releases. Promoting one you liked into a real lossless copy means
+adding the artist or album to the library manager, which is not yet wired up.
+Fetching the whole station up front would pull 38 albums for a station
+abandoned after two songs.
 
 The known recording length is used to **choose** among search results rather
 than to reject whichever one came back: YouTube's top hit is regularly a live
@@ -534,8 +537,8 @@ keeps the strict 3% check — there, a mismatch means the wrong video.)
 
 Because radio needs its fetches within a song's length, they run on their own
 two-minute `radio-fetch.timer` on eliot, restricted to `--phase source`. The
-FLAC upgrade jobs in the same queue talk to Soulseek and must **not** run that
-often; the phase filter is what keeps the two cadences apart.
+FLAC upgrade jobs in the same queue reach an external source and must **not**
+run that often; the phase filter is what keeps the two cadences apart.
 
 ### Scrobbling
 
@@ -618,15 +621,16 @@ checks every followed artist's upcoming events, fills the **Shows** tab
 and pings ntfy (with a tap-through ticket link) whenever a new nearby show
 appears. Without the key the stage just skips.
 
-## Lidarr import list
+## Artist import list
 
 The daily run resolves each interesting artist (followed, or ≥3 liked tracks —
 `LIDARR_MIN_LIKED`) to a MusicBrainz artist id, ISRC lookup first and exact
 name search as fallback (`src/musicbrainz.ts`, cached in `artist_mbid`, capped
 at `LIDARR_MB_LIMIT`=500 lookups/run at MusicBrainz's 1 req/s). The web UI then
-serves **`/api/lidarr-list`** — `[{"MusicBrainzId": …, "ArtistName": …}, …]` —
-which Lidarr consumes as a *Custom List* import list
-(`http://spotify-taste-db-web:8080/api/lidarr-list` over `homelab-net`).
+serves an import-list endpoint returning
+`[{"MusicBrainzId": …, "ArtistName": …}, …]`, which the library manager
+consumes as a custom list over `homelab-net`. The exact route is in
+`src/server.ts`.
 No-match artists are recorded as `''` and retried monthly; only exact
 normalized name matches are accepted, so a miss beats monitoring a stranger's
 discography.
