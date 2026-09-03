@@ -8,9 +8,12 @@ import { Readable } from 'node:stream';
 import {
   DiscogsClient, DiscogsError, ShelfStore, albumKey, toShelfItem, type ShelfStatus,
 } from './discogs.ts';
-import { JellyfinBridge, LOCAL_LIBRARY_PREFIX, type TasteTrack } from './jellyfin.ts';
+import { JellyfinBridge, LOCAL_LIBRARY_PREFIX, normalizeMusicText, type TasteTrack } from './jellyfin.ts';
 import { LyricsService } from './lyrics.ts';
 import { resolveViaSearch } from './musicbrainz.ts';
+import {
+  chooseContinuation, type ContinuationAlbum,
+} from './continuation.ts';
 import { APP_PLAYS_FILE, PlaysStore } from './plays.ts';
 import {
   LIB_ALBUM_PREFIX, ProvenanceStore, albumMatchKey, badgeOf, libAlbumId, libAlbumIdForFolder,
@@ -307,6 +310,105 @@ function localAlbums(): { id: string; name: string; artists: string; total_track
     }
   }
   return [...albums.values()].sort((a, b) => b.added_at.localeCompare(a.added_at));
+}
+
+type ArtistTaste = { genres: string[]; affinity: number };
+let continuationCache: { at: number; albums: ContinuationAlbum[] } | null = null;
+
+function parsedGenres(value: string | null): string[] {
+  try {
+    const parsed = JSON.parse(value ?? '[]');
+    return Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Every whole album which autoplay can actually put on next.
+ *
+ * Provenance is the source of truth because it describes files on disk; the
+ * taste DB only enriches those albums with release dates and the artist's
+ * already-cached genres/affinity. No Spotify, MusicBrainz or ListenBrainz
+ * request is made while a record is ending.
+ */
+function continuationAlbums(ttlMs = 60_000): ContinuationAlbum[] {
+  if (continuationCache && Date.now() - continuationCache.at < ttlMs) return continuationCache.albums;
+
+  const taste = new Map<string, ArtistTaste>();
+  const liked = new Map((query(`
+    SELECT ta.artist_id, COUNT(DISTINCT ta.track_id) n
+    FROM track_artists ta JOIN liked_tracks lt ON lt.track_id = ta.track_id
+    WHERE lt.removed_at IS NULL GROUP BY ta.artist_id
+  `) as { artist_id: string; n: number }[]).map((row) => [row.artist_id, Number(row.n)]));
+  const tops = new Map((query(`
+    SELECT artist_id, MIN(rank) rank FROM top_artists
+    WHERE time_range = 'medium_term' GROUP BY artist_id
+  `) as { artist_id: string; rank: number }[]).map((row) => [row.artist_id, Number(row.rank)]));
+  for (const row of query(`
+    SELECT id, name, genres, popularity, is_followed FROM artists
+  `) as { id: string; name: string; genres: string | null; popularity: number | null; is_followed: number }[]) {
+    const topRank = tops.get(row.id);
+    const top = topRank == null ? 0 : Math.max(0, 501 - topRank) * 2;
+    taste.set(normalizeMusicText(row.name), {
+      genres: parsedGenres(row.genres),
+      affinity: Number(row.is_followed ?? 0) * 1_000
+        + Number(liked.get(row.id) ?? 0) * 25
+        + top
+        + Number(row.popularity ?? 0),
+    });
+  }
+
+  // A library folder has no canonical release-date column. Match its tags to
+  // the taste DB where possible; an unmatched release simply falls back to
+  // when its files landed, which is still a stable ordering.
+  const releases = new Map<string, string>();
+  for (const row of query(`
+    SELECT al.name, al.release_date,
+      (SELECT a.name FROM album_artists aa JOIN artists a ON a.id = aa.artist_id
+        WHERE aa.album_id = al.id ORDER BY aa.position LIMIT 1) AS artist
+    FROM albums al WHERE al.release_date IS NOT NULL
+  `) as { name: string; release_date: string; artist: string | null }[]) {
+    const key = albumMatchKey(row.artist ?? '', row.name);
+    const seen = releases.get(key);
+    if (key && (!seen || row.release_date > seen)) releases.set(key, row.release_date);
+  }
+
+  const albums = provenance.albums()
+    // `_Singles/<artist>` is a growing loose-track collection, not an album;
+    // dropping it into an album run could add hundreds of unrelated songs.
+    .filter((album) => album.id && album.artists && !relOf(album.rel).startsWith('_Singles/'))
+    .map((album) => {
+      const exact = taste.get(normalizeMusicText(album.artists));
+      const lead = exact ?? taste.get(normalizeMusicText(primaryArtist(album.artists)));
+      return {
+        id: album.id,
+        name: album.name,
+        artist: album.artists,
+        sortDate: releases.get(albumMatchKey(album.artists, album.name)) ?? album.added_at,
+        genres: lead?.genres ?? [],
+        affinity: lead?.affinity ?? 0,
+      };
+    });
+  continuationCache = { at: Date.now(), albums };
+  return albums;
+}
+
+/** The on-disk album behind any player track id, including Spotify ids. */
+function continuationAlbumId(track: TasteTrack, albums?: ContinuationAlbum[]): string | null {
+  if (track.album_id?.startsWith(LIB_ALBUM_PREFIX)) return track.album_id;
+  const scanned = provenance.trackById(track.id);
+  if (scanned) return libAlbumId(scanned.path);
+  // The indexed artist+title lookup keeps the ordinary resolve path cheap.
+  // Confirm the album too: the same song can exist on an original record and
+  // a compilation, and the player should continue from the one it named.
+  const byTitle = provenance.byMatchKey(provenanceKey(track.artists, track.name));
+  if (byTitle && (!track.album || albumMatchKey(byTitle.artist, byTitle.album) === albumMatchKey(track.artists, track.album))) {
+    return libAlbumId(byTitle.path);
+  }
+  if (!albums) return null;
+  const key = albumMatchKey(track.artists, track.album);
+  return albums.find((album) => albumMatchKey(album.artist, album.name) === key)?.id ?? null;
 }
 
 
@@ -764,6 +866,8 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
   '/api/player/resolve': async (params) => {
     const track = tasteTrack(params.get('id') ?? '');
     if (!track) return { available: false, reason: 'unknown-track', detail: 'This track is not in the taste database' };
+    const albumId = continuationAlbumId(track);
+    const publicTrack = albumId ? { ...track, continuation_album_id: albumId } : track;
     const status = await jellyfin.status();
     if (status.state !== 'ready') {
       return { available: false, reason: status.state, detail: status.detail, wakeAvailable: status.wakeAvailable };
@@ -782,14 +886,66 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
         available: false,
         reason: 'not-matched',
         detail: 'No local file for this track — its album may not be downloaded yet. The library is re-syncing; try again in a minute.',
-        track,
+        track: publicTrack,
       };
     }
     return {
       available: true,
       streamUrl: `/api/player/stream?id=${encodeURIComponent(track.id)}`,
       confidence: match.score,
-      track,
+      track: publicTrack,
+    };
+  },
+
+  /**
+   * Append another whole record when the visible list has played through.
+   *
+   * The client calls this during the last track's normal 20-second prefetch
+   * window, so even the album boundary stays gapless. Selection itself is
+   * local and deterministic; see continuation.ts for the three-step policy.
+   */
+  '/api/player/continuation': (params) => {
+    const currentTrack = tasteTrack(params.get('id') ?? '');
+    if (!currentTrack) return { available: false, reason: 'unknown-track', tracks: [] };
+    const albums = continuationAlbums();
+    const currentAlbumId = continuationAlbumId(currentTrack, albums);
+    const visited = (params.get('visited') ?? '').split(',')
+      .filter((id) => /^libalbum-[a-f0-9]+$/.test(id))
+      .slice(-200);
+    let reset = false;
+    let choice = chooseContinuation(albums, {
+      currentAlbumId,
+      currentArtist: currentTrack.artists,
+      visitedAlbumIds: visited,
+    });
+    // A very long session may eventually visit the entire shelf. Begin a new
+    // lap instead of turning autoplay off at an arbitrary library boundary.
+    if (!choice) {
+      reset = true;
+      choice = chooseContinuation(albums, {
+        currentAlbumId,
+        currentArtist: currentTrack.artists,
+        visitedAlbumIds: currentAlbumId ? [currentAlbumId] : [],
+      });
+    }
+    if (!choice) return { available: false, reason: 'no-other-album', tracks: [] };
+    const tracks = provenance.albumTracks(choice.album.id).map((row) => ({
+      ...libAsTasteTrack(row),
+      album_id: choice!.album.id,
+      continuation_album_id: choice!.album.id,
+      image_url: `/img/folder?rel=${encodeURIComponent(path.dirname(relOf(row.path)))}`,
+    }));
+    return {
+      available: tracks.length > 0,
+      reason: choice.reason,
+      vibeScore: choice.vibeScore,
+      reset,
+      album: {
+        id: choice.album.id,
+        name: choice.album.name,
+        artists: choice.album.artist,
+      },
+      tracks,
     };
   },
 

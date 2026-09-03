@@ -49,6 +49,12 @@
   let queueIndex = -1;
   let current = null;
   let pendingTrackId = null;
+  let continuationAlbums = [];
+  let continuationEnabled = true;
+  let continuationPromise = null;
+  let continuationStopped = false;
+  let continuationRetryAt = 0;
+  let advancing = false;
   let toastTimer;
   // Local play log: accumulated listened-milliseconds for the current
   // track, flushed to the server when the track ends or is left. The
@@ -106,7 +112,10 @@
       const resume = current && audio.currentTime > 5
         ? { id: current.id, pos: Math.floor(audio.currentTime) }
         : pendingResume;
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ queue, queueIndex, volume: audio.volume, resume }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        queue, queueIndex, volume: audio.volume, resume,
+        continuationAlbums, continuationEnabled,
+      }));
     } catch { /* private browsing can deny storage */ }
   };
 
@@ -115,6 +124,10 @@
       const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}');
       queue = Array.isArray(saved.queue) ? saved.queue.filter((item) => item?.id).slice(0, 500) : [];
       queueIndex = Number.isInteger(saved.queueIndex) && saved.queueIndex < queue.length ? saved.queueIndex : -1;
+      continuationAlbums = Array.isArray(saved.continuationAlbums)
+        ? saved.continuationAlbums.filter((id) => /^libalbum-[a-f0-9]+$/.test(id)).slice(-200)
+        : [];
+      continuationEnabled = saved.continuationEnabled !== false;
       audioA.volume = audioB.volume = Number.isFinite(saved.volume) ? Math.max(0, Math.min(1, saved.volume)) : .52;
       // The stored value is the gain; the slider shows its position.
       volume.value = String(positionFor(audio.volume));
@@ -138,6 +151,8 @@
     } catch {
       queue = [];
       queueIndex = -1;
+      continuationAlbums = [];
+      continuationEnabled = true;
       audioA.volume = audioB.volume = .52;
     }
   };
@@ -181,18 +196,28 @@
    * started, and rebuilding the queue from the page would restart playback.
    * Exposed on window because the station view lives in the other script.
    */
-  window.musicQueueAppend = (tracks) => {
-    const known = new Set(queue.map((item) => item.id));
+  window.musicQueueAppend = (tracks, options = {}) => {
+    // A new lap through a small library may legitimately repeat a track, but
+    // it must never duplicate something still waiting later in the queue.
+    const compared = options.allowPlayedDuplicates ? queue.slice(queueIndex + 1) : queue;
+    const known = new Set(compared.map((item) => item.id));
     const added = tracks.filter((item) => item.id && !known.has(item.id));
     if (!added.length) return 0;
     queue = queue.concat(added);
+    // Autoplay can run for days. Keep enough history for Previous without
+    // letting localStorage and the queue DOM grow forever.
+    if (queue.length > 500 && queueIndex > 100) {
+      const drop = Math.min(queueIndex - 100, queue.length - 500);
+      queue.splice(0, drop);
+      queueIndex -= drop;
+    }
     renderQueue();
     save();
     return added.length;
   };
   window.musicQueueHas = (id) => queue.some((item) => item.id === id);
 
-  const setQueueFromButtons = (buttons, selectedId) => {
+  const setQueueFromButtons = (buttons, selectedId, keepPlayingAfterList = true) => {
     const seen = new Set();
     queue = buttons.map((button) => ({
       id: button.dataset.trackId,
@@ -203,8 +228,19 @@
       imageUrl: button.dataset.trackImage || '',
     })).filter((item) => item.id && !seen.has(item.id) && seen.add(item.id));
     queueIndex = Math.max(0, queue.findIndex((item) => item.id === selectedId));
+    continuationAlbums = [];
+    continuationEnabled = keepPlayingAfterList;
+    continuationPromise = null;
+    continuationStopped = false;
+    continuationRetryAt = 0;
     renderQueue();
     save();
+  };
+
+  const rememberContinuationAlbum = (track) => {
+    const id = String(track?.continuation_album_id || '').trim();
+    if (!/^libalbum-[a-f0-9]+$/.test(id)) return;
+    continuationAlbums = continuationAlbums.filter((seen) => seen !== id).concat(id).slice(-200);
   };
 
   /**
@@ -489,6 +525,67 @@
     notify(result.detail || 'This track is not available in the local archive');
   };
 
+  /**
+   * Grow an exhausted ordinary queue by one whole local album.
+   *
+   * This is also called by the last track's prefetch, so normally it finishes
+   * before `ended` fires. A shared promise prevents timeupdate and a manual
+   * Next press from asking for two albums at once.
+   */
+  const appendContinuation = () => {
+    if (!continuationEnabled || continuationStopped || !current?.id || Date.now() < continuationRetryAt) {
+      return Promise.resolve(0);
+    }
+    if (continuationPromise) return continuationPromise;
+    continuationPromise = (async () => {
+      const seedId = current.id;
+      try {
+        const params = new URLSearchParams({
+          id: seedId,
+          visited: continuationAlbums.join(','),
+        });
+        const response = await fetch(`/api/player/continuation?${params}`);
+        if (!response.ok) throw new Error(`continuation ${response.status}`);
+        const data = await response.json();
+        if (current?.id !== seedId) return 0;
+        if (!data.available || !Array.isArray(data.tracks) || !data.tracks.length) {
+          continuationStopped = true;
+          return 0;
+        }
+        if (data.reset) continuationAlbums = [];
+        const tracks = data.tracks.map((track) => ({
+          id: track.id,
+          name: track.name || 'Unknown track',
+          artists: track.artists || '',
+          durationMs: Number(track.duration_ms || 0),
+          albumId: track.album_id || data.album?.id || '',
+          imageUrl: track.image_url || '',
+          continuationAlbumId: track.continuation_album_id || data.album?.id || '',
+        }));
+        const added = window.musicQueueAppend(tracks, { allowPlayedDuplicates: Boolean(data.reset) });
+        if (!added) {
+          continuationStopped = true;
+          return 0;
+        }
+        rememberContinuationAlbum({ continuation_album_id: data.album?.id });
+        const bridge = data.reason === 'same-artist' ? 'More from'
+          : data.reason === 'same-vibe' ? 'Same vibe'
+          : 'Next artist';
+        notify(`${bridge}: ${data.album.name} — ${data.album.artists}`);
+        return added;
+      } catch {
+        // A network wobble at the boundary should not cause four retries per
+        // second from timeupdate. The current queue remains intact and a
+        // later prefetch/Next press can try again.
+        continuationRetryAt = Date.now() + 30_000;
+        return 0;
+      } finally {
+        continuationPromise = null;
+      }
+    })();
+    return continuationPromise;
+  };
+
   const playAt = async (index) => {
     if (!queue.length || index < 0 || index >= queue.length) return;
     flushPlay(false);
@@ -527,7 +624,11 @@
         name: current.name,
         artists: current.artists || '',
         durationMs: current.duration_ms || queue[index].durationMs,
+        albumId: current.album_id || queue[index].albumId,
+        imageUrl: current.image_url || queue[index].imageUrl,
+        continuationAlbumId: current.continuation_album_id || queue[index].continuationAlbumId,
       };
+      rememberContinuationAlbum(current);
       pendingTrackId = null;
       setNowPlayingCopy(current);
       overline.textContent = 'Local archive · Jellyfin';
@@ -551,7 +652,11 @@
   // ~20s before a track ends, resolve the next queue item and buffer it in
   // the standby element; `next` then swaps elements instead of re-fetching.
   const prefetchNext = async () => {
-    const upNext = queue[queueIndex + 1];
+    let upNext = queue[queueIndex + 1];
+    if (!upNext) {
+      await appendContinuation();
+      upNext = queue[queueIndex + 1];
+    }
     if (!upNext || prefetch?.trackId === upNext.id) return;
     prefetch = { trackId: upNext.id, ready: false, track: null };
     try {
@@ -567,40 +672,65 @@
     } catch { /* fall back to the normal resolve path on ended */ }
   };
 
-  const next = () => {
-    flushPlay(true);
-    const index = queueIndex + 1;
-    if (index >= queue.length) {
-      audio.pause();
-      audio.currentTime = 0;
-      bar.dataset.state = 'paused';
-      return;
+  const next = async () => {
+    if (advancing) return;
+    advancing = true;
+    try {
+      flushPlay(true);
+      let index = queueIndex + 1;
+      if (index >= queue.length) {
+        bar.dataset.state = 'loading';
+        overline.textContent = 'Finding what plays next';
+        playButton.disabled = true;
+        await appendContinuation();
+        index = queueIndex + 1;
+        if (index >= queue.length) {
+          audio.pause();
+          audio.currentTime = 0;
+          bar.dataset.state = 'paused';
+          overline.textContent = 'End of queue';
+          playButton.disabled = false;
+          return;
+        }
+      }
+      if (prefetch?.ready && prefetch.trackId === queue[index].id && prefetch.track) {
+        const old = audio;
+        audio = standby();
+        old.pause();
+        old.removeAttribute('src');
+        old.load();
+        queueIndex = index;
+        current = prefetch.track;
+        queue[index] = {
+          ...queue[index],
+          name: current.name,
+          artists: current.artists || queue[index].artists,
+          durationMs: current.duration_ms || queue[index].durationMs,
+          albumId: current.album_id || queue[index].albumId,
+          imageUrl: current.image_url || queue[index].imageUrl,
+          continuationAlbumId: current.continuation_album_id || queue[index].continuationAlbumId,
+        };
+        rememberContinuationAlbum(current);
+        pendingTrackId = null;
+        prefetch = null;
+        bar.dataset.state = 'loading';
+        setNowPlayingCopy(current);
+        overline.textContent = 'Local archive · Jellyfin';
+        setArtwork(current);
+        updateMediaSession(current);
+        loadLyrics(current);
+        playButton.disabled = false;
+        scrubber.disabled = false;
+        renderQueue();
+        save();
+        startPlayLog(current.id);
+        audio.play().catch(() => playAt(index));
+        return;
+      }
+      await playAt(index);
+    } finally {
+      advancing = false;
     }
-    if (prefetch?.ready && prefetch.trackId === queue[index].id && prefetch.track) {
-      const old = audio;
-      audio = standby();
-      old.pause();
-      old.removeAttribute('src');
-      old.load();
-      queueIndex = index;
-      current = prefetch.track;
-      pendingTrackId = null;
-      prefetch = null;
-      bar.dataset.state = 'loading';
-      setNowPlayingCopy(current);
-      overline.textContent = 'Local archive · Jellyfin';
-      setArtwork(current);
-      updateMediaSession(current);
-      loadLyrics(current);
-      playButton.disabled = false;
-      scrubber.disabled = false;
-      renderQueue();
-      save();
-      startPlayLog(current.id);
-      audio.play().catch(() => playAt(index));
-      return;
-    }
-    playAt(index);
   };
 
   const previous = () => {
@@ -648,7 +778,11 @@
     const trackButton = event.target.closest('.track-play');
     if (trackButton) {
       const scope = trackButton.closest('.rows') || document.querySelector('#main');
-      setQueueFromButtons([...scope.querySelectorAll('.track-play')], trackButton.dataset.trackId);
+      setQueueFromButtons(
+        [...scope.querySelectorAll('.track-play')],
+        trackButton.dataset.trackId,
+        !trackButton.closest('#station-rows'),
+      );
       playAt(queueIndex);
       return;
     }
@@ -659,7 +793,7 @@
     if (albumButton) {
       const buttons = [...document.querySelectorAll('#main .track-play')];
       if (!buttons.length) return;
-      setQueueFromButtons(buttons, buttons[0].dataset.trackId);
+      setQueueFromButtons(buttons, buttons[0].dataset.trackId, !albumButton.matches('.play-station'));
       playAt(0);
       return;
     }

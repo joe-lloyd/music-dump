@@ -100,6 +100,31 @@ import lands. Playback controls resolve against the local
 Jellyfin library; an item that is merely known to Spotify is never presented as
 successfully playable.
 
+### Continuous play across albums
+
+An ordinary queue no longer stops at the last visible song. Tracks first play
+in the order shown on the page; during the final track's normal 20-second
+prefetch window, the player appends another **whole local album**:
+
+1. the next unplayed album by the same artist, in newest-to-oldest discography
+   order (wrapping once if the session began in the middle);
+2. when that artist's local albums are exhausted, the newest album by another
+   artist with overlapping cached genres / the same broad vibe (so ambient,
+   chillwave and downtempo can keep a quiet run together);
+3. when there is no genre evidence, the alphabetically next artist's newest
+   album, which is deterministic and works for library-only artists too.
+
+Genre similarity and personal-affinity tie-breaking use metadata already in
+`spotify.db`; album/track availability comes only from `provenance.db`. The
+existing MusicBrainz ids remain the durable identity used by Lidarr and radio,
+but no MusicBrainz or ListenBrainz request is made at an album boundary:
+MusicBrainz is not an audio-energy database, and putting a public request there
+would add both latency and a new failure mode to playback. The visited-album
+history is persisted and bounded, completed queue rows are trimmed after 500
+tracks, and a session that genuinely traverses the shelf starts another lap.
+Radio stations keep their separate discovery/fetch-ahead behavior and do not
+switch into album autoplay while station tracks are still landing.
+
 Lyrics are local-first: a matched track asks Jellyfin for its lyrics (which
 covers `.lrc` sidecar files beside the audio and embedded lyric tags), and
 LRCLIB fills the gaps — identified client, 10 s timeout, hits cached forever
