@@ -2621,6 +2621,19 @@ const server = http.createServer(async (req, res) => {
       }
       return;
     }
+    // Client-side routes are real paths now, not #hashes, so a hard load or a
+    // refresh of /album/<id> arrives here as a path the server has never heard
+    // of. Hand anything left to the app and let its router decide.
+    //
+    // Scoped by exclusion rather than by listing the routes: the route table
+    // lives in TypeScript in another repository and this file cannot import it,
+    // so anything under /api or /img keeps its honest 404 — a mistyped endpoint
+    // must not answer 200 with a page — and everything else gets the document.
+    if (req.method === 'GET' && !url.pathname.startsWith('/api/') && !url.pathname.startsWith('/img/')) {
+      res.writeHead(200, { 'content-type': documentType, 'cache-control': 'no-cache' });
+      res.end(readFileSync(INDEX));
+      return;
+    }
     res.writeHead(404, { 'content-type': 'text/plain' });
     res.end('not found');
   } catch (err) {
