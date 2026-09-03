@@ -10,8 +10,11 @@ import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
+import { uiDir } from '../ui/index.js';
 
-const PUBLIC = path.join(import.meta.dirname, '..', 'public');
+// The files now live in the shared ui/ package, and its own manifest says where
+// -- asking it beats hardcoding a path that only one of the two consumers uses.
+const PUBLIC = uiDir;
 
 function inlineScripts(html: string): string[] {
   // Only scripts with a body; `<script src=...>` has nothing to parse here.

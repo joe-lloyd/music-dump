@@ -8,6 +8,12 @@ import { Readable } from 'node:stream';
 import {
   DiscogsClient, DiscogsError, ShelfStore, albumKey, toShelfItem, type ShelfStatus,
 } from './discogs.ts';
+// The front end is a shared package, vendored as the ui/ submodule, so that the
+// desktop shell can serve byte-identical files. Its routes.json -- not this
+// file -- is the single source of truth for what lives at which URL.
+import {
+  indexHtml as INDEX, staticFiles as STATIC_FILES, documentUrls, documentType,
+} from '../ui/index.js';
 import { JellyfinBridge, LOCAL_LIBRARY_PREFIX, normalizeMusicText, type TasteTrack } from './jellyfin.ts';
 import { LyricsService } from './lyrics.ts';
 import { resolveViaSearch } from './musicbrainz.ts';
@@ -31,14 +37,6 @@ import { RadioEngine, primaryArtist, type RadioEntry, type RadioSeed } from './r
 const ROOT = path.join(import.meta.dirname, '..');
 const DB_FILE = process.env.SPOTIFY_DB ?? path.join(ROOT, 'data', 'spotify.db');
 const PORT = Number(process.env.PORT ?? 8080);
-const INDEX = path.join(ROOT, 'public', 'index.html');
-const STATIC_FILES: Record<string, { file: string; type: string }> = {
-  '/app.css': { file: path.join(ROOT, 'public', 'app.css'), type: 'text/css; charset=utf-8' },
-  '/player.js': { file: path.join(ROOT, 'public', 'player.js'), type: 'text/javascript; charset=utf-8' },
-  '/sw.js': { file: path.join(ROOT, 'public', 'sw.js'), type: 'text/javascript; charset=utf-8' },
-  '/manifest.webmanifest': { file: path.join(ROOT, 'public', 'manifest.webmanifest'), type: 'application/manifest+json' },
-  '/icon.svg': { file: path.join(ROOT, 'public', 'icon.svg'), type: 'image/svg+xml' },
-};
 // Where this container sees the music library that the worker writes to.
 // Empty disables file-based cover lookup and leaves only the Jellyfin path.
 const APP_LIBRARY_PREFIX = process.env.APP_LIBRARY_PREFIX ?? '/music';
@@ -2516,14 +2514,14 @@ const server = http.createServer(async (req, res) => {
       res.end(body);
       return;
     }
-    if (url.pathname === '/' || url.pathname === '/index.html') {
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    if (documentUrls.includes(url.pathname)) {
+      res.writeHead(200, { 'content-type': documentType });
       res.end(readFileSync(INDEX));
       return;
     }
     const staticFile = STATIC_FILES[url.pathname];
     if (staticFile) {
-      res.writeHead(200, { 'content-type': staticFile.type, 'cache-control': 'no-cache' });
+      res.writeHead(200, { 'content-type': staticFile.type, 'cache-control': staticFile.cacheControl });
       res.end(readFileSync(staticFile.file));
       return;
     }

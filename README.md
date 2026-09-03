@@ -79,7 +79,18 @@ SELECT substr(added_at, 1, 7) AS month, COUNT(*) FROM liked_tracks GROUP BY mont
 
 ## Web UI
 
-`src/server.ts` + `public/index.html`: a read-only browser over the DB —
+The front end is **not in this repo**. It lives in
+[`music-ui`](https://github.com/joe-lloyd/music-ui) and is vendored here as the
+`ui/` submodule, because a second consumer — the
+[`homelab-music`](https://github.com/joe-lloyd/homelab-music) desktop tray app —
+serves the identical files. One copy, pinned by commit on each side, so a fix to
+the lyric scroll cannot land in one and be forgotten in the other.
+
+`ui/routes.json` is the single source of truth for what serves at which URL and
+under which content type; `src/server.ts` reads it rather than restating it.
+To change the UI, commit in `music-ui`, then bump the submodule pointer here.
+
+`src/server.ts` + `ui/public/index.html`: a read-only browser over the DB —
 overview stats (genres, liked-per-month), artist grid with search, liked
 songs, saved albums, playlists, top artists/tracks per time range, recent
 plays. Navigation is internal: artist → discography → album detail with
@@ -567,8 +578,22 @@ the Pi is v18). The deployed copy at `pi:~/spotify-taste-db` is a checkout of
 <https://github.com/joe-lloyd/music-dump>; update with:
 
 ```sh
-ssh pi 'cd spotify-taste-db && git pull && docker compose up -d --force-recreate'
+ssh pi 'cd spotify-taste-db && git pull --recurse-submodules && docker compose up -d --force-recreate'
 ```
+
+> **`--recurse-submodules` is not optional.** The front end is the `ui/`
+> submodule. A plain `git pull` leaves it at the old commit — or, on a checkout
+> that predates it, empty — and `src/server.ts` imports from it at startup, so
+> the web container crash-loops on `ERR_MODULE_NOT_FOUND` rather than serving a
+> stale page. On a checkout that has never seen the submodule, initialise it
+> once first:
+>
+> ```sh
+> ssh pi 'cd spotify-taste-db && git submodule update --init'
+> ```
+>
+> `music-ui` is public, so this needs no credentials on the Pi — which is
+> exactly why it is public.
 
 Logs via `docker logs spotify-taste-db` / `docker logs spotify-taste-db-web`;
 the DB lives at `data/spotify.db` on the Pi. Grab a copy for local querying
