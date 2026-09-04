@@ -3,6 +3,7 @@
 import http from 'node:http';
 import path from 'node:path';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { Readable } from 'node:stream';
 import {
@@ -12,7 +13,8 @@ import {
 // desktop shell can serve byte-identical files. Its routes.json -- not this
 // file -- is the single source of truth for what lives at which URL.
 import {
-  indexHtml as INDEX, staticFiles as STATIC_FILES, documentUrls, documentType,
+  allFiles as UI_FILES, indexHtml as INDEX, staticFiles as STATIC_FILES,
+  documentUrls, documentType,
 } from '../ui/index.js';
 import { JellyfinBridge, LOCAL_LIBRARY_PREFIX, normalizeMusicText, type TasteTrack } from './jellyfin.ts';
 import { LyricsService } from './lyrics.ts';
@@ -232,6 +234,43 @@ function query(sql: string, ...args: (string | number)[]): unknown[] {
   } finally {
     db.close();
   }
+}
+
+// The identity of the front end this server is serving.
+//
+// The desktop shell does not fetch the UI, it EMBEDS it at compile time
+// (`include_dir!` over ui/public), so its copy is a snapshot taken whenever
+// its binary was last built. Nothing made that snapshot going stale visible:
+// push to music-ui, deploy here, and the desktop keeps serving the old front
+// end until somebody remembers to bump its submodule. That is exactly what
+// happened to the player-bar link fixes.
+//
+// So both hosts can answer "which UI is this?" the same way: hash the bytes
+// they actually serve. A digest rather than a version string or a git sha
+// deliberately - it needs no release discipline to stay honest, cannot be
+// bumped without the files really changing, and is computable identically
+// from Rust over the embedded copy.
+//
+// Computed once. These files only change when the process restarts.
+let uiDigestCache: string | null = null;
+
+/** sha256 over every file routes.json names, in path order. */
+function uiDigest(): string {
+  if (uiDigestCache) return uiDigestCache;
+  const hash = createHash('sha256');
+  // Sorted by BASENAME, which is the one ordering both hosts can agree on:
+  // the absolute paths differ between a Node checkout and an embedded Rust
+  // directory, the file names do not. Compared with < rather than
+  // localeCompare, because the Rust side sorts bytes and localeCompare is
+  // free to disagree with that under a different locale.
+  const names = UI_FILES.map((file) => [path.basename(file), file] as const)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  for (const [name, file] of names) {
+    hash.update(name);
+    hash.update(readFileSync(file));
+  }
+  uiDigestCache = hash.digest('hex');
+  return uiDigestCache;
 }
 
 const LOCAL_TRACK_PREFIX = 'localtrack-';
@@ -1151,6 +1190,11 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
       tracks,
     };
   },
+
+  // Which front end this server is serving, for a host that embeds its own
+  // copy to check itself against. See uiDigest(). Cheap enough to call on
+  // every launch and on every network change.
+  '/api/ui-build': () => ({ digest: uiDigest() }),
 
   // Everything the overview needs, with Spotify plays (main DB) and this
   // app's plays (own DB) merged in JS — cross-database joins aren't worth

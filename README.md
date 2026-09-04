@@ -90,6 +90,49 @@ the lyric scroll cannot land in one and be forgotten in the other.
 under which content type; `src/server.ts` reads it rather than restating it.
 To change the UI, commit in `music-ui`, then bump the submodule pointer here.
 
+### Telling the two consumers apart — `/api/ui-build`
+
+"Pinned by commit on each side" is exactly the thing that goes wrong. This
+server reads `ui/` off disk, so a `git pull` on pi-server updates it. The
+desktop app **compiles the UI into its binary**, so its copy is frozen at
+whenever it was last built — push to `music-ui`, deploy here, and the desktop
+keeps serving the old front end with no symptom other than a fix that "did not
+arrive". That is what happened to the player-bar link fixes.
+
+So both sides can be asked which UI they hold. `GET /api/ui-build` returns
+
+```json
+{ "digest": "d9ab4e2816bd3e2d8e7e57f7e7a8d00628d57d9c1d2b50dfbc5f6c5183868f27" }
+```
+
+a sha256 over every file `routes.json` names: for each, in **file-name order**,
+the name then the bytes. `uiDigest()` in `src/server.ts` and `Ui::digest()` in
+homelab-music's `routes.rs` must agree byte for byte, so the rule is fixed:
+sorted by basename with a plain `<` comparison (not `localeCompare`, which is
+free to disagree with Rust's byte ordering under another locale). `music-ui`
+pins `* text=auto eol=lf` in `.gitattributes`, which is what makes the digest
+portable — without it a Windows checkout and a Linux one would hash
+differently for the same commit.
+
+A digest rather than a version string on purpose: it needs no release
+discipline to stay honest, and it cannot be bumped without the files actually
+changing. Recompute it independently with:
+
+```sh
+python - <<'EOF'
+import hashlib, json, os
+m = json.load(open('ui/routes.json', encoding='utf-8'))
+files = [m['document']['file']] + [v['file'] for v in m['static'].values()]
+h = hashlib.sha256()
+for name, path in sorted((os.path.basename(f), os.path.join('ui', f)) for f in files):
+    h.update(name.encode()); h.update(open(path, 'rb').read())
+print(h.hexdigest())
+EOF
+```
+
+homelab-music pins that value in a test, so a change to the hashing rule fails
+there loudly instead of silently reporting every desktop build as out of date.
+
 `src/server.ts` + `ui/public/index.html`: a read-only browser over the DB —
 overview stats (genres, liked-per-month), artist grid with search, liked
 songs, saved albums, playlists, top artists/tracks per time range, recent
