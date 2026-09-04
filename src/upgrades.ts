@@ -2,6 +2,8 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { provenanceKey } from './provenance.ts';
+import type { ReferenceAlbum, ReferenceTrack } from './albumref.ts';
 
 export const UPGRADES_FILE = process.env.UPGRADES_DB
   ?? path.join(import.meta.dirname, '..', 'data', 'upgrades.db');
@@ -36,6 +38,7 @@ export interface UpgradeJob {
   auto_upgrade: number;
   recording_mbid: string | null;
   release_mbid: string | null;
+  release_group_mbid: string | null;
   phase: UpgradePhase;
   status: UpgradeStatus;
   source_attempts: number;
@@ -135,6 +138,19 @@ export function validWorkerToken(configured: string, supplied: string): boolean 
 // Lossy containers the intake can hand back; kept in step with the worker's
 // INTAKE_CODECS. Lossless never appears here - that is what an upgrade produces.
 export const INTAKE_CODECS = new Set(['mp3', 'opus', 'aac', 'vorbis']);
+
+export type AlbumWantRoute = 'lidarr' | 'youtube';
+export type AlbumWantStatus = 'pending' | 'sent' | 'failed' | 'done';
+
+export interface AlbumWant {
+  release_group_mbid: string;
+  route: AlbumWantRoute;
+  status: AlbumWantStatus;
+  source_url: string | null;
+  requested_at: string;
+  updated_at: string;
+  last_error: string | null;
+}
 
 export interface LocalTrack {
   id: string;            // "localtrack-<queue id>"
@@ -239,6 +255,65 @@ export class UpgradeStore {
         candidate TEXT
       );
 
+      -- The album a track belongs to, for music the library holds only as a
+      -- single (or does not hold at all). These rows are a REFERENCE: they
+      -- describe a record we can see the shape of but do not own, which is
+      -- what makes "we have 1 of 11 tracks" and "get me the other ten"
+      -- expressible at all. Keyed by release-group because that is both
+      -- MusicBrainz's idea of an album and Lidarr's foreignAlbumId.
+      CREATE TABLE IF NOT EXISTS reference_albums (
+        release_group_mbid TEXT PRIMARY KEY,
+        release_mbid TEXT NOT NULL,
+        title TEXT NOT NULL,
+        artist TEXT NOT NULL,
+        artist_mbid TEXT,
+        primary_type TEXT,
+        secondary_types TEXT,
+        first_released TEXT,
+        track_count INTEGER NOT NULL,
+        resolved_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS reference_tracks (
+        release_group_mbid TEXT NOT NULL
+          REFERENCES reference_albums(release_group_mbid) ON DELETE CASCADE,
+        disc INTEGER NOT NULL,
+        position INTEGER NOT NULL,
+        recording_mbid TEXT,
+        title TEXT NOT NULL,
+        length_ms INTEGER,
+        PRIMARY KEY (release_group_mbid, disc, position)
+      );
+
+      -- Which album a name resolved to, misses included. '' records "looked
+      -- up, no album found" so a track MusicBrainz cannot place is not
+      -- resolved again on every poll - the same convention imported_artists
+      -- uses, for the same reason.
+      CREATE TABLE IF NOT EXISTS album_lookups (
+        match_key TEXT PRIMARY KEY,
+        release_group_mbid TEXT,
+        checked_at TEXT NOT NULL
+      );
+
+      -- "Get me the whole record." One row per album asked for: the route is
+      -- part of the row rather than the key, because asking Lidarr and then
+      -- deciding to take it off YouTube instead is a change of mind about one
+      -- album, not a second want. Lidarr wants are drained over SSH by
+      -- HomeLab: pi-server/lidarr-library-sync; nothing here talks to eliot.
+      CREATE TABLE IF NOT EXISTS album_wants (
+        release_group_mbid TEXT PRIMARY KEY,
+        route TEXT NOT NULL CHECK (route IN ('lidarr', 'youtube')),
+        status TEXT NOT NULL CHECK (status IN ('pending', 'sent', 'failed', 'done')),
+        source_url TEXT,
+        requested_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        last_error TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_reference_tracks_recording
+        ON reference_tracks(recording_mbid) WHERE recording_mbid IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_album_wants_pending
+        ON album_wants(status, requested_at);
       CREATE INDEX IF NOT EXISTS idx_upgrade_due
         ON upgrade_queue(status, next_attempt_at);
       CREATE INDEX IF NOT EXISTS idx_upgrade_attempts_job
@@ -280,6 +355,12 @@ export class UpgradeStore {
     }
     if (!columns.has('release_mbid')) {
       this.db.exec('ALTER TABLE upgrade_queue ADD COLUMN release_mbid TEXT');
+    }
+    // The album this single turned out to be off. Distinct from release_mbid:
+    // that is the edition MusicBrainz happened to name, this is the album
+    // identity Lidarr is asked with and the reference tracklist is keyed by.
+    if (!columns.has('release_group_mbid')) {
+      this.db.exec('ALTER TABLE upgrade_queue ADD COLUMN release_group_mbid TEXT');
     }
     this.db.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_upgrade_parent_track
@@ -443,6 +524,247 @@ export class UpgradeStore {
           updated_at = ?
       WHERE id = ?
     `).run(recordingMbid, releaseMbid, nowIso(this.now), id);
+  }
+
+  // --- reference albums ---------------------------------------------------
+
+  /**
+   * Store an album's shape, replacing whatever was there.
+   *
+   * Whole-tracklist replacement rather than a merge: a re-resolve means we
+   * chose a different release (a better edition, or a correction), and half of
+   * one tracklist spliced onto half of another is not any real record.
+   */
+  saveReferenceAlbum(album: ReferenceAlbum): void {
+    if (!album.releaseGroupMbid || !album.tracks.length) {
+      throw new Error('a reference album needs a release group and at least one track');
+    }
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare(`
+        INSERT INTO reference_albums (
+          release_group_mbid, release_mbid, title, artist, artist_mbid,
+          primary_type, secondary_types, first_released, track_count, resolved_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(release_group_mbid) DO UPDATE SET
+          release_mbid = excluded.release_mbid,
+          title = excluded.title,
+          artist = excluded.artist,
+          artist_mbid = excluded.artist_mbid,
+          primary_type = excluded.primary_type,
+          secondary_types = excluded.secondary_types,
+          first_released = excluded.first_released,
+          track_count = excluded.track_count,
+          resolved_at = excluded.resolved_at
+      `).run(
+        album.releaseGroupMbid, album.releaseMbid, album.title, album.artist,
+        album.artistMbid, album.primaryType, JSON.stringify(album.secondaryTypes),
+        album.firstReleased, album.tracks.length, nowIso(this.now),
+      );
+      this.db.prepare('DELETE FROM reference_tracks WHERE release_group_mbid = ?')
+        .run(album.releaseGroupMbid);
+      const insert = this.db.prepare(`
+        INSERT INTO reference_tracks
+          (release_group_mbid, disc, position, recording_mbid, title, length_ms)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      for (const track of album.tracks) {
+        insert.run(
+          album.releaseGroupMbid, track.disc, track.position,
+          track.recordingMbid, track.title, track.lengthMs,
+        );
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  referenceAlbum(releaseGroupMbid: string): ReferenceAlbum | null {
+    const row = this.db.prepare(
+      'SELECT * FROM reference_albums WHERE release_group_mbid = ?',
+    ).get(releaseGroupMbid) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    const tracks = (this.db.prepare(`
+      SELECT disc, position, recording_mbid, title, length_ms
+      FROM reference_tracks WHERE release_group_mbid = ?
+      ORDER BY disc, position
+    `).all(releaseGroupMbid) as Record<string, unknown>[]).map((track): ReferenceTrack => ({
+      disc: Number(track.disc),
+      position: Number(track.position),
+      recordingMbid: track.recording_mbid == null ? null : String(track.recording_mbid),
+      title: String(track.title ?? ''),
+      lengthMs: track.length_ms == null ? null : Number(track.length_ms),
+    }));
+    let secondaryTypes: string[] = [];
+    try {
+      const parsed = JSON.parse(String(row.secondary_types ?? '[]'));
+      if (Array.isArray(parsed)) secondaryTypes = parsed.map((type) => String(type));
+    } catch { /* written by us, but never trust a text column to still be JSON */ }
+    return {
+      releaseGroupMbid: String(row.release_group_mbid),
+      releaseMbid: String(row.release_mbid),
+      title: String(row.title ?? ''),
+      artist: String(row.artist ?? ''),
+      artistMbid: row.artist_mbid == null ? null : String(row.artist_mbid),
+      primaryType: row.primary_type == null ? null : String(row.primary_type),
+      secondaryTypes,
+      firstReleased: row.first_released == null ? null : String(row.first_released),
+      tracks,
+    };
+  }
+
+  /** Remember which album a name resolved to, including that it resolved to none. */
+  rememberAlbumLookup(artist: string, title: string, releaseGroupMbid: string | null): void {
+    const key = provenanceKey(artist, title);
+    if (!key) return;
+    this.db.prepare(
+      'INSERT OR REPLACE INTO album_lookups (match_key, release_group_mbid, checked_at) VALUES (?, ?, ?)',
+    ).run(key, releaseGroupMbid ?? '', nowIso(this.now));
+  }
+
+  /** null = never looked up. '' = looked up and MusicBrainz had no album for it. */
+  albumLookup(artist: string, title: string): string | null {
+    const key = provenanceKey(artist, title);
+    if (!key) return null;
+    const row = this.db.prepare(
+      'SELECT release_group_mbid FROM album_lookups WHERE match_key = ?',
+    ).get(key) as { release_group_mbid: string } | undefined;
+    return row ? String(row.release_group_mbid ?? '') : null;
+  }
+
+  /**
+   * Singles whose album is still a blank, newest first.
+   *
+   * Newest first because the interesting one is the song you just played, not
+   * the backlog. A miss is retried after `retryDays`: MusicBrainz gains
+   * releases, and a track it could not place last month it may place now.
+   *
+   * A job with no MusicBrainz identity is still offered. Whether one can be
+   * found for it - ListenBrainz turns artist+title into a recording id - is
+   * the caller's business, not this table's.
+   */
+  jobsAwaitingAlbum(limit = 5, retryDays = 30): UpgradeJob[] {
+    const stale = new Date(this.now() - retryDays * 86_400_000).toISOString();
+    const candidates = (this.db.prepare(`
+      SELECT * FROM upgrade_queue
+      WHERE release_group_mbid IS NULL
+        AND source_mode = 'single'
+        AND parent_id IS NULL
+      ORDER BY id DESC
+    `).all() as unknown[]).map(asJob);
+    const out: UpgradeJob[] = [];
+    for (const job of candidates) {
+      if (out.length >= limit) break;
+      const row = this.db.prepare(
+        'SELECT release_group_mbid, checked_at FROM album_lookups WHERE match_key = ?',
+      ).get(provenanceKey(job.artist, job.title)) as
+        { release_group_mbid: string; checked_at: string } | undefined;
+      // Never looked up, or a miss old enough to be worth asking about again.
+      if (!row) out.push(job);
+      else if (!row.release_group_mbid && row.checked_at <= stale) out.push(job);
+    }
+    return out;
+  }
+
+  /** Point a job at the album it turned out to be off. */
+  attachAlbum(id: number, releaseGroupMbid: string): void {
+    this.db.prepare(
+      'UPDATE upgrade_queue SET release_group_mbid = ?, updated_at = ? WHERE id = ?',
+    ).run(releaseGroupMbid, nowIso(this.now), id);
+  }
+
+  /**
+   * Which of a reference album's tracks the queue can already account for.
+   *
+   * Matched on title within the album's artist rather than on a recording id,
+   * because a YouTube-sourced single carries no recording id of its own - the
+   * whole reason this feature exists. Keyed "disc:position".
+   */
+  albumCoverage(releaseGroupMbid: string): Map<string, UpgradeJob> {
+    const album = this.referenceAlbum(releaseGroupMbid);
+    const out = new Map<string, UpgradeJob>();
+    if (!album) return out;
+    const jobs = (this.db.prepare(`
+      SELECT * FROM upgrade_queue
+      WHERE release_group_mbid = ? OR artist = ? COLLATE NOCASE
+    `).all(releaseGroupMbid, album.artist) as unknown[]).map(asJob);
+    const byKey = new Map(jobs.map((job) => [provenanceKey(job.artist, job.title), job]));
+    for (const track of album.tracks) {
+      const job = byKey.get(provenanceKey(album.artist, track.title));
+      if (job) out.set(`${track.disc}:${track.position}`, job);
+    }
+    return out;
+  }
+
+  // --- wanting a whole album ----------------------------------------------
+
+  /**
+   * Ask for the whole record.
+   *
+   * Idempotent per album: asking twice is one want. Changing route is an
+   * update, not a second row, and it resets the status - "get it off YouTube
+   * instead" is a new request even though it is the same album. Re-asking for
+   * the same route leaves a sent want sent, so the Lidarr push cannot be made
+   * to do the same work twice by a double click.
+   */
+  wantAlbum(
+    releaseGroupMbid: string,
+    route: AlbumWantRoute,
+    sourceUrl: string | null = null,
+  ): AlbumWant {
+    if (!this.referenceAlbum(releaseGroupMbid)) {
+      throw new Error('that album has not been resolved yet');
+    }
+    const at = nowIso(this.now);
+    this.db.prepare(`
+      INSERT INTO album_wants
+        (release_group_mbid, route, status, source_url, requested_at, updated_at)
+      VALUES (?, ?, 'pending', ?, ?, ?)
+      ON CONFLICT(release_group_mbid) DO UPDATE SET
+        route = excluded.route,
+        source_url = COALESCE(excluded.source_url, album_wants.source_url),
+        status = CASE WHEN album_wants.route = excluded.route
+                      THEN album_wants.status ELSE 'pending' END,
+        last_error = CASE WHEN album_wants.route = excluded.route
+                          THEN album_wants.last_error ELSE NULL END,
+        updated_at = excluded.updated_at
+    `).run(releaseGroupMbid, route, sourceUrl, at, at);
+    const want = this.albumWant(releaseGroupMbid);
+    if (!want) throw new Error('the album want did not persist');
+    return want;
+  }
+
+  albumWant(releaseGroupMbid: string): AlbumWant | null {
+    const row = this.db.prepare(
+      'SELECT * FROM album_wants WHERE release_group_mbid = ?',
+    ).get(releaseGroupMbid);
+    return row ? (row as unknown as AlbumWant) : null;
+  }
+
+  /**
+   * The push queue, for the hourly sync on pi-server to drain.
+   *
+   * Served the album's identity and nothing else: the release-group id IS
+   * Lidarr's foreignAlbumId, so the puller needs no lookup of its own. Failed
+   * wants come back too - eliot being asleep is the ordinary case, not an
+   * error worth losing the request over.
+   */
+  pendingAlbumWants(route: AlbumWantRoute | null = null): (AlbumWant & { title: string; artist: string })[] {
+    return this.db.prepare(`
+      SELECT w.*, a.title, a.artist FROM album_wants w
+      JOIN reference_albums a ON a.release_group_mbid = w.release_group_mbid
+      WHERE w.status IN ('pending', 'failed')
+        AND (? IS NULL OR w.route = ?)
+      ORDER BY w.requested_at
+    `).all(route, route) as unknown as (AlbumWant & { title: string; artist: string })[];
+  }
+
+  markAlbumWant(releaseGroupMbid: string, status: AlbumWantStatus, error: string | null = null): void {
+    this.db.prepare(
+      'UPDATE album_wants SET status = ?, last_error = ?, updated_at = ? WHERE release_group_mbid = ?',
+    ).run(status, error, nowIso(this.now), releaseGroupMbid);
   }
 
   /** Radio-sourced singles that landed, for the artwork backfill. */

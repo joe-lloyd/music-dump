@@ -32,6 +32,7 @@ import {
 } from './upgrades.ts';
 import { resolveArtwork as resolveArtworkIn } from './artwork.ts';
 import { ListenBrainz, type RadioMode } from './listenbrainz.ts';
+import { resolveAlbum } from './albumref.ts';
 import { RadioEngine, primaryArtist, type RadioEntry, type RadioSeed } from './radio.ts';
 
 const ROOT = path.join(import.meta.dirname, '..');
@@ -235,6 +236,72 @@ function query(sql: string, ...args: (string | number)[]): unknown[] {
 
 const LOCAL_TRACK_PREFIX = 'localtrack-';
 const LOCAL_ALBUM_PREFIX = 'localalbum-';
+
+// Library music carries an artist *name* and nothing else - the scanner reads
+// it off a tag, and a Soulseek folder has never heard of a Spotify id. That is
+// why every library surface used to send `{ id: null }` and render the artist
+// as dead text: the name was all there was to send.
+//
+// Most of those names are an artist we already know. 1044 of 1209 library
+// albums match a row in `artists` on name alone, Steven Wilson among them, so
+// resolving the name is the difference between a dead label and the artist
+// page that already exists. The rest (Mogwai, Squarepusher - library-only
+// artists Spotify never told us about) stay null and stay text, which is the
+// honest answer: there is no page to send them to.
+const artistIdCache = new Map<string, string | null>();
+let artistIdCacheAt = 0;
+const ARTIST_ID_TTL_MS = 5 * 60_000;
+
+/** Fold a credit to its comparable core: case, accents, "&"/"and", punctuation. */
+function normalizeArtistName(value: string | null | undefined): string {
+  return String(value ?? '')
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+/**
+ * The artist a library credit refers to, or null when we hold no page for them.
+ *
+ * Only the *lead* credit is resolved. "Mogwai feat. Roky Erickson" is a Mogwai
+ * track however it is tagged, and linking it to Mogwai is right; inventing a
+ * combined artist to link to would not be. The whole `artists` table is used
+ * rather than the taste-filtered view, because a library album is exactly the
+ * case where we own the music without having liked it on Spotify.
+ */
+function artistIdForName(name: string | null | undefined): string | null {
+  const now = Date.now();
+  if (now - artistIdCacheAt > ARTIST_ID_TTL_MS) {
+    artistIdCache.clear();
+    artistIdCacheAt = now;
+    for (const row of query(`SELECT id, name FROM artists WHERE removed_at IS NULL`)) {
+      const artist = row as { id?: string; name?: string };
+      const key = normalizeArtistName(artist.name);
+      // First writer wins: the artists table holds duplicates from discography
+      // crawls, and picking the same one every time beats picking whichever
+      // SQLite happened to return last.
+      if (key && artist.id && !artistIdCache.has(key)) artistIdCache.set(key, String(artist.id));
+    }
+  }
+  const raw = String(name ?? '').trim();
+  if (!raw) return null;
+  // Try the credit whole first - "Simon & Garfunkel" is one artist, not two -
+  // then fall back to the lead name before a feature or a collaboration join.
+  const candidates = [raw, raw.split(/\s+(?:feat\.?|featuring|ft\.?|with|,|&|\/|\bx\b)\s+/i)[0] ?? ''];
+  for (const candidate of candidates) {
+    const hit = artistIdCache.get(normalizeArtistName(candidate));
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/** The `artists` array every album detail sends, with an id when we have one. */
+function creditedArtists(name: string | null | undefined): { id: string | null; name: string }[] {
+  return [{ id: artistIdForName(name), name: String(name ?? '') }];
+}
 
 // Music that came in through the app itself (YouTube / Spotify-link intake)
 // has no Spotify identity, so it lives in the upgrade store rather than the
@@ -517,6 +584,35 @@ function relOf(workerPath: string): string {
 }
 
 /**
+ * Is this folder the `_Singles` shelf rather than a record?
+ *
+ * A `_Singles` folder is a COLLECTION: its tracks each name their own release,
+ * so the folder's page is titled "Singles" and not borrowed from whichever
+ * track happened to sort first.
+ */
+function isSinglesRel(rel: string): boolean {
+  return relOf(rel).startsWith('_Singles/');
+}
+
+/**
+ * What the album page for this id will actually call itself.
+ *
+ * The player bar needs this, not the track's own album tag. "The 78" is tagged
+ * `Harmony Korine` but lives on the Singles shelf, so the bar was labelling a
+ * link "Harmony Korine" that led to a page headed "Singles" - and clicking it
+ * while already on that page looked like a link that did nothing. Label the
+ * link with where it goes.
+ */
+function albumDisplayName(albumId: string | null | undefined, fallback: string | null | undefined): string {
+  const id = String(albumId ?? '');
+  if (id.startsWith(LIB_ALBUM_PREFIX)) {
+    const first = provenance.albumTracks(id)[0];
+    if (first) return isSinglesRel(first.path) ? 'Singles' : String(first.album ?? fallback ?? '');
+  }
+  return String(fallback ?? '');
+}
+
+/**
  * The album title inside a Lidarr folder name.
  *
  * Folders are "Album (Year) [Type]" while the tags inside say "Album", and
@@ -692,6 +788,106 @@ function resolveImportedArtists(batch = 5): void {
   })();
 }
 
+// Filling in the blanks: a single is one track off a record nobody has.
+//
+// This resolves WHICH record and stores its tracklist as a reference, so an
+// album the library holds one song of can be seen whole - and then asked for
+// whole, either from Lidarr or off YouTube. Background and bounded for exactly
+// the reason resolveImportedArtists is: the caller is a click on "play", while
+// MusicBrainz allows one request a second and ListenBrainz is a shared service.
+let fillingAlbums = false;
+
+function fillAlbumBlanks(batch = 3): void {
+  if (fillingAlbums) return;
+  const pending = upgrades.jobsAwaitingAlbum(batch);
+  if (!pending.length) return;
+  fillingAlbums = true;
+  void (async () => {
+    try {
+      for (const job of pending) {
+        try {
+          let recordingMbid = job.recording_mbid;
+          let releaseMbid = job.release_mbid;
+          // A track pulled from YouTube has no MusicBrainz identity of its own.
+          // ListenBrainz turning artist+title into one is the only route to it,
+          // and it caches misses, so this is cheap on the second pass.
+          if (!recordingMbid && !releaseMbid && listenbrainz.enabled) {
+            const found = await listenbrainz.lookup(job.artist, job.title);
+            if (found) {
+              upgrades.attachMbids(job.id, found.recordingMbid, found.releaseMbid);
+              recordingMbid = found.recordingMbid;
+              releaseMbid = found.releaseMbid;
+            }
+          }
+          // Still nothing to resolve from. Do NOT record that as a miss: a
+          // miss means "asked, and there is no album", and it suppresses the
+          // track for thirty days. Configuring ListenBrainz tomorrow should
+          // fix this on the next poll, not a month from now.
+          if (!recordingMbid && !releaseMbid) continue;
+
+          const album = await resolveAlbum({ recordingMbid, releaseMbid, artist: job.artist });
+          if (album) {
+            upgrades.saveReferenceAlbum(album);
+            upgrades.attachAlbum(job.id, album.releaseGroupMbid);
+          }
+          // Answered either way. Recording the miss is what stops the same
+          // unplaceable track being looked up on every single poll.
+          upgrades.rememberAlbumLookup(job.artist, job.title, album?.releaseGroupMbid ?? null);
+        } catch {
+          break;      // rate limited or offline - the next poll carries on
+        }
+      }
+    } finally {
+      fillingAlbums = false;
+    }
+  })();
+}
+
+/**
+ * A reference album with the library's answer against each track.
+ *
+ * "We have 1 of 11" is the whole point, so ownership is resolved per track
+ * from two places: a scanned file in the library means we have it, and a queue
+ * row means it is on its way. Matched by name, because a YouTube-sourced
+ * single carries no recording id - which is what made the album a blank.
+ */
+function referenceAlbumView(releaseGroupMbid: string): Record<string, unknown> | null {
+  const album = upgrades.referenceAlbum(releaseGroupMbid);
+  if (!album) return null;
+  const coverage = upgrades.albumCoverage(releaseGroupMbid);
+  let owned = 0;
+  const tracks = album.tracks.map((track) => {
+    const file = provenance.byMatchKey(provenanceKey(album.artist, track.title));
+    const job = coverage.get(`${track.disc}:${track.position}`);
+    if (file) owned += 1;
+    return {
+      disc: track.disc,
+      position: track.position,
+      title: track.title,
+      duration_ms: track.lengthMs,
+      recording_mbid: track.recordingMbid,
+      owned: Boolean(file),
+      codec: file?.codec ?? null,
+      queue_status: job?.status ?? null,
+      track_id: file ? libTrackId(file.path) : null,
+    };
+  });
+  return {
+    release_group_mbid: album.releaseGroupMbid,
+    release_mbid: album.releaseMbid,
+    title: album.title,
+    artist: album.artist,
+    artist_mbid: album.artistMbid,
+    primary_type: album.primaryType,
+    secondary_types: album.secondaryTypes,
+    first_released: album.firstReleased,
+    track_count: album.tracks.length,
+    owned_count: owned,
+    want: upgrades.albumWant(releaseGroupMbid),
+    tracks,
+  };
+}
+
 function tasteTrack(id: string): TasteTrack | null {
   const local = localTrack(id);
   if (local) return localAsTasteTrack(local);
@@ -865,7 +1061,16 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
     const track = tasteTrack(params.get('id') ?? '');
     if (!track) return { available: false, reason: 'unknown-track', detail: 'This track is not in the taste database' };
     const albumId = continuationAlbumId(track);
-    const publicTrack = albumId ? { ...track, continuation_album_id: albumId } : track;
+    // artist_id is what lets the player bar link its byline. Resolved by name
+    // for the same reason the album pages do it: a library track carries a
+    // credit string and no id, and the bar is the one place the artist is
+    // named on every screen.
+    const publicTrack = {
+      ...track,
+      ...(albumId ? { continuation_album_id: albumId } : {}),
+      artist_id: artistIdForName(track.artists),
+      album_name: albumDisplayName(track.album_id, track.album),
+    };
     const status = await jellyfin.status();
     if (status.state !== 'ready') {
       return { available: false, reason: status.state, detail: status.detail, wakeAvailable: status.wakeAvailable };
@@ -1164,7 +1369,7 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
       if (!tracks.length) return { album: null, artists: [], tracks: [] };
       const first = tracks[0];
       const newest = Math.max(...tracks.map((track) => Number(track.mtime ?? 0)));
-      const singlesFolder = relOf(first.path).startsWith('_Singles/');
+      const singlesFolder = isSinglesRel(first.path);
       return {
         album: {
           id,
@@ -1183,7 +1388,7 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
           local: 1,
           source: first.source,
         },
-        artists: [{ id: null, name: first.artist }],
+        artists: creditedArtists(first.artist),
         tracks: tracks.map((track) => {
           const badge = badgeOf(track);
           return {
@@ -1226,8 +1431,7 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
           downloaded: 1,
           local: 1,
         },
-        // No Spotify artist id to link to, so the name carries it.
-        artists: [{ id: null, name: first.artists }],
+        artists: creditedArtists(first.artists),
         tracks: tracks.map((track) => ({
           id: track.id,
           name: track.name,
@@ -1294,7 +1498,7 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
     // an album you own ("Fated" by Nosaj Thing, when you own one single from
     // it). Say what it is - the same music reads the same here as it does on
     // Latest, just gathered.
-    const isSingles = relOf(album.rel).startsWith('_Singles/');
+    const isSingles = isSinglesRel(album.rel);
     return {
       id: album.id,
       name: isSingles ? 'Singles' : album.name,
@@ -1886,6 +2090,10 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/upgrades') {
       if (req.method === 'GET') {
         const result = upgrades.list(Number(url.searchParams.get('limit') ?? 250));
+        // Fire-and-forget, picked up by the next poll: the queue view is the
+        // page most likely to be open while blanks are waiting to be filled,
+        // and a track parked by radio never passed through /api/tracks/want.
+        fillAlbumBlanks();
         json(res, 200, { ...result, jobs: result.jobs.map(publicUpgrade) });
         return;
       }
@@ -2457,12 +2665,172 @@ const server = http.createServer(async (req, res) => {
           recordingMbid: body.recordingMbid ? String(body.recordingMbid) : null,
           releaseMbid: body.releaseMbid ? String(body.releaseMbid) : null,
         });
+        // The song is on its way; which record it is off is a separate,
+        // slower question. Answer it in the background so the click is not
+        // waiting on MusicBrainz.
+        fillAlbumBlanks();
         json(res, 200, { outcome: 'fetching', job, detail: 'Getting it from YouTube now' });
       } catch (err) {
         json(res, 400, { error: (err as Error).message });
       }
       return;
     }
+    /**
+     * The album a single turned out to be off, with the library's answer
+     * against every track on it. Read-only: resolution happens in the
+     * background, so a blank still being a blank is a 404 rather than a wait.
+     */
+    if (url.pathname === '/api/albums/reference') {
+      if (req.method !== 'GET') {
+        res.writeHead(405, { allow: 'GET' }).end();
+        return;
+      }
+      const id = String(url.searchParams.get('id') ?? '').trim().toLowerCase();
+      if (!id) {
+        json(res, 422, { error: 'id is required' });
+        return;
+      }
+      const view = referenceAlbumView(id);
+      if (!view) {
+        json(res, 404, { error: 'that album has not been resolved yet' });
+        return;
+      }
+      json(res, 200, view);
+      return;
+    }
+
+    /**
+     * "Get me the whole record."
+     *
+     * The two answers to a filled-in blank, and choosing between them is the
+     * point of the feature:
+     *
+     *   lidarr  - queued for the hourly push on pi-server to hand over. NOTHING
+     *             here talks to eliot: Lidarr's API key deliberately never
+     *             leaves that box, and the box sleeps, so a UI click cannot
+     *             depend on reaching it. The release-group id we stored IS
+     *             Lidarr's foreignAlbumId, so the push needs no lookup.
+     *   youtube - straight into the existing album intake, which needs a URL
+     *             because only a person can say which upload is the album.
+     */
+    if (url.pathname === '/api/albums/want') {
+      if (req.method !== 'POST') {
+        res.writeHead(405, { allow: 'POST' }).end();
+        return;
+      }
+      try {
+        const body = await readJson(req);
+        const id = String(body.releaseGroupMbid ?? '').trim().toLowerCase();
+        const route = String(body.route ?? 'lidarr');
+        if (route !== 'lidarr' && route !== 'youtube') {
+          json(res, 422, { error: 'route must be lidarr or youtube' });
+          return;
+        }
+        const album = upgrades.referenceAlbum(id);
+        if (!album) {
+          json(res, 404, { error: 'that album has not been resolved yet' });
+          return;
+        }
+
+        if (route === 'youtube') {
+          const sourceUrl = String(body.sourceUrl ?? '').trim();
+          if (!validSourceUrl(sourceUrl) || !isYouTubeUrl(sourceUrl)) {
+            json(res, 422, { error: 'a YouTube album needs an https YouTube playlist or video URL' });
+            return;
+          }
+          const sourceMode = body.sourceMode === 'chapters' ? 'chapters' : 'playlist';
+          // Named the way /api/upgrades names a batch parent: the record's own
+          // title, so the queue reads as one album rather than a stray track.
+          const job = upgrades.create({
+            sourceUrl,
+            downloader: 'yt-dlp',
+            sourceMode,
+            artist: album.artist,
+            title: album.title,
+            album: album.title,
+            releaseMbid: album.releaseMbid,
+          });
+          upgrades.attachAlbum(job.id, id);
+          upgrades.wantAlbum(id, 'youtube', sourceUrl);
+          // Handed off the moment the queue owns it - the queue's own status is
+          // the honest account of what happens next.
+          upgrades.markAlbumWant(id, 'sent');
+          json(res, 201, {
+            want: upgrades.albumWant(id),
+            // Re-read: create() answered before the album was attached, and a
+            // response that says release_group_mbid is null would be a lie.
+            job: publicUpgrade(upgrades.get(job.id) ?? job),
+            detail: `Importing ${album.title} from YouTube`,
+          });
+          return;
+        }
+
+        const want = upgrades.wantAlbum(id, 'lidarr');
+        json(res, 202, {
+          want,
+          detail: want.status === 'pending'
+            ? `Queued for Lidarr — ${album.artist} — ${album.title}`
+            : `Already sent to Lidarr — ${album.title}`,
+        });
+      } catch (err) {
+        json(res, 400, { error: (err as Error).message });
+      }
+      return;
+    }
+
+    /**
+     * The push queue, for the hourly sync on pi-server to drain.
+     *
+     * A read: it says what is wanted, not that anything was done about it.
+     * Marking a want sent is the puller's job (POST /api/albums/wants/ack), so
+     * a crashed push does not silently lose the request.
+     */
+    if (url.pathname === '/api/albums/wants') {
+      if (req.method === 'GET') {
+        const route = url.searchParams.get('route');
+        json(res, 200, {
+          wants: upgrades.pendingAlbumWants(
+            route === 'lidarr' || route === 'youtube' ? route : null,
+          ),
+        });
+        return;
+      }
+      res.writeHead(405, { allow: 'GET' }).end();
+      return;
+    }
+
+    if (url.pathname === '/api/albums/wants/ack') {
+      if (req.method !== 'POST') {
+        res.writeHead(405, { allow: 'POST' }).end();
+        return;
+      }
+      // Same shared secret the FLAC worker uses: this is a machine on the LAN
+      // reporting what it did, not something a browser should be able to say.
+      if (!workerAuthorized(req)) {
+        json(res, 401, { error: 'worker token required' });
+        return;
+      }
+      try {
+        const body = await readJson(req);
+        const id = String(body.releaseGroupMbid ?? '').trim().toLowerCase();
+        const status = String(body.status ?? '');
+        if (!['sent', 'failed', 'done'].includes(status)) {
+          json(res, 422, { error: 'status must be sent, failed, or done' });
+          return;
+        }
+        if (!upgrades.albumWant(id)) {
+          json(res, 404, { error: 'no such album want' });
+          return;
+        }
+        const error = body.error ? String(body.error).slice(0, 500) : null;
+        upgrades.markAlbumWant(id, status as 'sent' | 'failed' | 'done', error);
+        json(res, 200, { want: upgrades.albumWant(id) });
+      } catch (err) {
+        json(res, 400, { error: (err as Error).message });
+      }
+      return;
+    }
+
     if (url.pathname === '/api/player/stream') {
       if (req.method !== 'GET' && req.method !== 'HEAD') {
         res.writeHead(405, { allow: 'GET, HEAD' }).end();

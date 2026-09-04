@@ -635,6 +635,84 @@ No-match artists are recorded as `''` and retried monthly; only exact
 normalized name matches are accepted, so a miss beats monitoring a stranger's
 discography.
 
+## Filling in the blanks — the album behind a single
+
+A track pulled from YouTube arrives with an artist, a title and nothing else.
+`src/albumref.ts` answers "what record is this off?", stores that record's whole
+tracklist as a **reference** — rows describing music the library does *not*
+have — and from there the album can be asked for whole.
+
+Resolution runs in the background (`fillAlbumBlanks` in `src/server.ts`), never
+on the click: ListenBrainz turns artist+title into a MusicBrainz recording id,
+and a single MusicBrainz release fetch returns the tracklist and its
+release-group together. A second and third call are spent only when that
+release turns out to be a single or a compilation. Results and **misses** are
+cached in `album_lookups` (`''` = looked up, no album), so an unplaceable track
+is not resolved again on every poll; misses are retried after 30 days.
+
+**Why MusicBrainz rather than asking Lidarr.** Lidarr runs on eliot behind an
+API key that deliberately never leaves that box, and eliot sleeps — a lookup on
+a UI click can depend on neither. It does not need to: Lidarr's
+`foreignAlbumId` **is** the MusicBrainz release-group id, so resolving here
+produces exactly the identifier Lidarr is later asked with.
+
+**Two rules decide which album, and both earn their keep.** Type scoring puts a
+studio album above an EP above an untyped release, and pushes compilations,
+live sets and DJ-mixes below all of them. On its own that is not enough:
+resolving Bonobo's "Kerala" really does answer *Chillout Sessions 20*, a
+42-track Various Artists DJ-mix. So the record must also be **credited to the
+artist** whose song we are placing (containment either way, because a track
+credited "Bonobo & Arooj Aftab" comes off an album credited "Bonobo"). Nothing
+album-shaped and correctly credited means the answer is a **blank**, not a
+best guess — the alternative is offering to send Lidarr after a DJ-mix, and
+Lidarr would go and get it.
+
+**Then which edition of it.** A release-group holds every pressing of one
+record, and they do not carry the same music: Insurgentes is a 3-disc hardback
+book edition (10 + 5 + 24) and also a 5-track digital bonus disc. The tracklist
+is read from the group's *earliest* release, which is the record as it came
+out. Compare the release's own date to get that — every release in a group
+reports the same `first-release-date`, so ranking on that field ranks a value
+against itself and keeps whichever edition MusicBrainz happened to list first.
+Multi-disc editions are kept as discs: `disc` comes off the medium position, so
+"The 78" is Insurgentes disc 2 track 5 rather than a single.
+
+Then the point of the whole thing, two routes out of a resolved album:
+
+| route | what happens |
+|---|---|
+| `lidarr` | A row in `album_wants`, drained by the hourly sync on pi-server. Nothing in this app talks to eliot. |
+| `youtube` | Straight into the existing album intake as a `playlist`/`chapters` job. Needs a URL — only a person can say which upload is the album. |
+
+```
+POST /api/albums/want      {"releaseGroupMbid": …, "route": "lidarr"}
+                           {"releaseGroupMbid": …, "route": "youtube",
+                            "sourceUrl": "https://…", "sourceMode": "playlist"}
+GET  /api/albums/reference?id=<release-group-mbid>
+GET  /api/albums/wants[?route=lidarr]     the push queue
+POST /api/albums/wants/ack                worker token required
+```
+
+`/api/albums/reference` answers the album with the library's verdict against
+every track — `owned`, `codec`, `queue_status` — which is what makes "we have 1
+of 13, here are the other twelve" expressible. Ownership is matched by name,
+because the single that started this carries no recording id of its own.
+
+Asking twice for one album is one want. Changing route is an update rather than
+a second row, and it resets the status: "get it off YouTube instead" is a new
+request about the same record. A `failed` want stays in the queue, because
+eliot being asleep is the ordinary case rather than a reason to lose it.
+
+**Not wired up yet:** the Lidarr push itself. `album_wants` is the contract —
+a puller reads `GET /api/albums/wants?route=lidarr`, POSTs each
+`release_group_mbid` to Lidarr as `foreignAlbumId` with `AlbumSearch`, and
+reports back to `/api/albums/wants/ack`. That belongs beside
+`pi-server/lidarr-library-sync` in the private infrastructure repo, which
+already holds the SSH channel to eliot and the API key. Until it exists, wants
+queue up and nothing is lost. Worth confirming with one call against the live
+Lidarr before writing it: that `foreignAlbumId` is the release-group id, not a
+release id.
+
 ## Importing your lifetime listening history
 
 Request "Extended streaming history" at <https://www.spotify.com/account/privacy/>

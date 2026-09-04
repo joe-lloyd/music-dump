@@ -14,9 +14,15 @@ const MB_LIMIT = Number(process.env.LIDARR_MB_LIMIT ?? 500);
 // server.ts applies the same threshold when serving the list — keep in sync.
 const MIN_LIKED = Number(process.env.LIDARR_MIN_LIKED ?? 3);
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+export const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function mbGet(pathName: string, params: Record<string, string>): Promise<any> {
+/**
+ * One GET against MusicBrainz, with the User-Agent it requires and the backoff
+ * its 503s demand. Exported because it is the only correct way to talk to
+ * musicbrainz.org from this codebase — a second copy would be a second chance
+ * to forget the User-Agent and get the whole app blocked.
+ */
+export async function mbGet(pathName: string, params: Record<string, string>): Promise<any> {
   const url = new URL(`${MB_API}/${pathName}`);
   for (const [k, v] of Object.entries({ ...params, fmt: 'json' })) url.searchParams.set(k, v);
   for (let attempt = 1; ; attempt++) {
