@@ -462,7 +462,7 @@ export class UpgradeStore {
         track_number: r.track_number == null ? null : Number(r.track_number),
         codec: (r.current_codec as string) ?? null,
         // A one-off download rather than a track of an imported album.
-        standalone: r.parent_id == null && r.source_mode === 'single',
+        standalone: r.parent_id == null && r.source_mode === 'single' && r.track_number == null,
         path: String(r.current_path ?? ''),
         added_at: String(r.created_at ?? ''),
       };
@@ -1049,10 +1049,9 @@ export class UpgradeStore {
     if (input.tracks.some((track) => !Number.isFinite(track.durationMs) || track.durationMs <= 0)) {
       throw new Error('every batch track requires a positive duration');
     }
-    // Intake keeps the source codec rather than re-encoding to MP3, so accept
-    // any lossy container the worker can produce. Lossless is rejected here
-    // because a batch track is by definition still awaiting its upgrade.
-    if (input.tracks.some((track) => !track.currentPath.trim() || !INTAKE_CODECS.has(track.currentCodec.trim().toLowerCase()))) {
+    // An album can mix new intake files with existing lossless recordings.
+    // create() parks reused lossless tracks without scheduling an upgrade.
+    if (input.tracks.some((track) => !track.currentPath.trim() || !(INTAKE_CODECS.has(track.currentCodec.trim().toLowerCase()) || isLosslessCodec(track.currentCodec)))) {
       throw new Error(`every batch track must reference an imported file (${[...INTAKE_CODECS].sort().join(', ')})`);
     }
 

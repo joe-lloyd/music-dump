@@ -637,3 +637,19 @@ test('a job cancelled before it downloaded anything can be asked for again', () 
     f.close();
   }
 });
+
+
+test('a mixed album preserves existing FLAC paths and only queues the new rip', () => {
+  const f = fixture();
+  try {
+    const parent = f.store.create({ artist: 'Porcupine Tree', title: 'Album', album: 'Album', sourceUrl: 'https://youtu.be/album', sourceMode: 'chapters' });
+    const claim = f.store.claim('worker')!;
+    const result = f.store.finishBatch({ id: parent.id, claimToken: claim.claim_token!, resultPath: '/music/album', tracks: [
+      { artist: 'Porcupine Tree', title: 'Even Less', album: 'Album', durationMs: 180000, currentPath: '/music/CD/Even Less.flac', currentCodec: 'flac', trackNumber: 1 },
+      { artist: 'Porcupine Tree', title: 'Other', album: 'Album', durationMs: 180000, currentPath: '/music/album/02.mp3', currentCodec: 'mp3', trackNumber: 2 },
+    ] });
+    assert.equal(result.children[0].status, 'already_lossless');
+    assert.equal(result.children[0].current_path, '/music/CD/Even Less.flac');
+    assert.equal(f.store.claim('worker')?.id, result.children[1].id);
+  } finally { f.close(); }
+});

@@ -1,3 +1,4 @@
+import { PlaylistStore } from './playlists.ts';
 // Web UI over the read-only taste DB plus small, separate mutable stores for
 // player history and the lossless-upgrade queue. Zero runtime dependencies.
 import http from 'node:http';
@@ -49,6 +50,7 @@ const jellyfin = new JellyfinBridge();
 const lyrics = new LyricsService();
 const appPlays = new PlaysStore();
 const upgrades = new UpgradeStore();
+const localPlaylists = new PlaylistStore();
 const provenance = new ProvenanceStore();
 const shelf = new ShelfStore();
 const discogs = new DiscogsClient();
@@ -387,6 +389,10 @@ function libAsTasteTrack(row: ProvenanceRow): TasteTrack {
 // by title matching: Jellyfin may not have probed their tags yet, and an
 // exact path can never resolve to the wrong recording.
 async function resolveMatch(track: TasteTrack) {
+  if (track.id.startsWith('setlist:')) {
+    const owned = provenance.byMatchKey(provenanceKey(track.artists ?? '', track.name));
+    if (owned) return jellyfin.matchPath(owned.path);
+  }
   const local = localTrack(track.id);
   if (local) return jellyfin.matchPath(local.path);
   // A library track knows its own file, so it resolves exactly rather than by
@@ -928,6 +934,20 @@ function referenceAlbumView(releaseGroupMbid: string): Record<string, unknown> |
 }
 
 function tasteTrack(id: string): TasteTrack | null {
+  if (id.startsWith('setlist:')) {
+    const entry = localPlaylists.track(id);
+    if (!entry) return null;
+    const owned = provenance.byMatchKey(provenanceKey(entry.artists ?? '', entry.name));
+    if (owned) return { ...libAsTasteTrack(owned), id };
+    const known = query(`SELECT t.id FROM tracks t
+      JOIN track_artists ta ON ta.track_id = t.id JOIN artists a ON a.id = ta.artist_id
+      WHERE lower(t.name) = lower(?) AND lower(a.name) = lower(?) ORDER BY t.id LIMIT 1`, entry.name, entry.artists ?? '')[0];
+    if (known && typeof known === 'object' && 'id' in known) {
+      const track = tasteTrack(String(known.id));
+      if (track) return { ...track, id };
+    }
+    return entry;
+  }
   const local = localTrack(id);
   if (local) return localAsTasteTrack(local);
   const scanned = provenance.trackById(id);
@@ -1859,10 +1879,12 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
         String(playlist.id),
       ) as { image_url: string }[]).map((row) => row.image_url);
     }
-    return playlists;
+    return [...localPlaylists.list(), ...playlists];
   },
 
-  '/api/playlist-tracks': (params) => query(`
+  '/api/playlist-tracks': (params) => params.get('id')?.startsWith('local-playlist:')
+    ? localPlaylists.tracks(params.get('id')!).map((track, position) => ({ ...(tasteTrack(track.id) ?? track), position: position + 1 }))
+    : query(`
     SELECT pt.position, pt.added_at, pt.removed_at, t.id, t.name, t.duration_ms,
            al.name AS album, al.id AS album_id, al.image_url,
            (SELECT group_concat(a.name, ', ' ORDER BY ta.position)
@@ -2131,6 +2153,61 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', 'http://localhost');
   try {
+    if (url.pathname === '/api/local-playlists') {
+      if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }).end(); return; }
+      try {
+        const body = await readJson(req);
+        const id = typeof body.id === 'string' ? body.id : null;
+        if (body.action === 'delete') {
+          if (!id) throw new Error('playlist id is required');
+          localPlaylists.remove(id);
+          json(res, 200, { deleted: true });
+        } else {
+          if (typeof body.name !== 'string' || !body.name.trim() || body.name.length > 200) throw new Error('playlist name is required, up to 200 characters');
+          if (!Array.isArray(body.trackIds) || body.trackIds.length > 1000) throw new Error('provide up to 1000 track IDs');
+          const tracks = body.trackIds.map((id: unknown) => {
+            if (typeof id !== 'string') throw new Error('invalid track ID');
+            const track = tasteTrack(id);
+            if (!track) throw new Error(`unknown track: ${id}`);
+            return track;
+          });
+          const saved = localPlaylists.save(id, body.name.trim(), String(body.description ?? '').slice(0, 2000), tracks);
+          json(res, 200, { id: saved });
+        }
+      } catch (error) { json(res, 422, { error: (error as Error).message }); }
+      return;
+    }
+    if (url.pathname === '/api/albums/import-tracks') {
+      if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }).end(); return; }
+      try {
+        const body = await readJson(req);
+        const tracks = query('SELECT id FROM tracks WHERE album_id = ? ORDER BY disc_number, track_number', String(body.albumId ?? ''));
+        if (!tracks.length) throw new Error('album has no known track listing');
+        const expected = query('SELECT total_tracks FROM albums WHERE id = ?', String(body.albumId ?? ''))[0];
+        if (expected && typeof expected === 'object' && 'total_tracks' in expected && Number(expected.total_tracks) > tracks.length) {
+          throw new Error('album track listing is incomplete; sync it before importing');
+        }
+        const jobs = [];
+        for (const [index, row] of tracks.entries()) {
+          if (!row || typeof row !== 'object' || !('id' in row)) throw new Error('invalid album track');
+          const track = tasteTrack(String(row.id));
+          if (!track) throw new Error('album track no longer exists');
+          const queued = upgrades.findQueued(track.artists ?? '', track.name);
+          if (queued) { jobs.push(publicUpgrade(queued)); continue; }
+          const owned = provenance.byMatchKey(provenanceKey(track.artists ?? '', track.name));
+          let match = null;
+          if (!owned) { try { match = await resolveMatch(track); } catch { /* worker checks the filesystem before intake */ } }
+          jobs.push(publicUpgrade(upgrades.create({
+            trackId: track.id, artist: track.artists ?? '', title: track.name, album: track.album,
+            trackNumber: index + 1, durationMs: track.duration_ms,
+            sourceUrl: `ytsearch5:${track.artists} ${track.name}`, downloader: 'yt-dlp',
+            currentPath: workerPath(owned?.path ?? match?.path ?? null), currentCodec: owned?.codec ?? match?.container,
+          })));
+        }
+        json(res, 201, { jobs, detail: `${jobs.length} album tracks queued or already in the archive` });
+      } catch (error) { json(res, 422, { error: (error as Error).message }); }
+      return;
+    }
     if (url.pathname === '/api/upgrades') {
       if (req.method === 'GET') {
         const result = upgrades.list(Number(url.searchParams.get('limit') ?? 250));
@@ -2255,6 +2332,17 @@ const server = http.createServer(async (req, res) => {
       } catch (err) {
         json(res, 409, { error: (err as Error).message });
       }
+      return;
+    }
+    if (url.pathname === '/api/upgrades/owned') {
+      if (req.method !== 'GET') { res.writeHead(405, { allow: 'GET' }).end(); return; }
+      if (!workerAuthorized(req)) { json(res, 401, { error: 'worker token required' }); return; }
+      const key = provenanceKey(url.searchParams.get('artist') ?? '', url.searchParams.get('title') ?? '');
+      const scanned = provenance.byMatchKey(key);
+      const files = upgrades.localTracks().filter(track => isLosslessCodec(track.codec) && provenanceKey(track.artists, track.name) === key)
+        .map(track => ({ path: track.path }));
+      if (scanned && isLosslessCodec(scanned.codec)) files.unshift({ path: workerPath(scanned.path)! });
+      json(res, 200, { files: files.slice(0, 10) });
       return;
     }
     if (url.pathname === '/api/upgrades/claim' || url.pathname === '/api/upgrades/complete') {
