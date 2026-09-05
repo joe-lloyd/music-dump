@@ -392,6 +392,8 @@ async function resolveMatch(track: TasteTrack) {
   if (track.id.startsWith('setlist:')) {
     const owned = provenance.byMatchKey(provenanceKey(track.artists ?? '', track.name));
     if (owned) return jellyfin.matchPath(owned.path);
+    const imported = upgrades.localTracks().find(item => provenanceKey(item.artists, item.name) === provenanceKey(track.artists, track.name));
+    if (imported) return jellyfin.matchPath(imported.path);
   }
   const local = localTrack(track.id);
   if (local) return jellyfin.matchPath(local.path);
@@ -938,7 +940,9 @@ function tasteTrack(id: string): TasteTrack | null {
     const entry = localPlaylists.track(id);
     if (!entry) return null;
     const owned = provenance.byMatchKey(provenanceKey(entry.artists ?? '', entry.name));
-    if (owned) return { ...libAsTasteTrack(owned), id };
+    if (owned) return { ...libAsTasteTrack(owned), id, name: entry.name };
+    const imported = upgrades.localTracks().find(track => provenanceKey(track.artists, track.name) === provenanceKey(entry.artists, entry.name));
+    if (imported) return { ...localAsTasteTrack(imported), id, name: entry.name };
     const known = query(`SELECT t.id FROM tracks t
       JOIN track_artists ta ON ta.track_id = t.id JOIN artists a ON a.id = ta.artist_id
       WHERE lower(t.name) = lower(?) AND lower(a.name) = lower(?) ORDER BY t.id LIMIT 1`, entry.name, entry.artists ?? '')[0];
