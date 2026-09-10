@@ -39,7 +39,22 @@ export interface PlayerMatch {
   albumId: string | null;
   container: string | null;
   path: string | null;
+  /**
+   * How long the matched file really is, as Jellyfin probed it.
+   *
+   * The taste database's duration_ms is Spotify's figure for its edition of
+   * the track, and the local file is often a different one: a remaster with a
+   * longer fade, a hidden track, a live cut. A match survives that (the
+   * length only adds points, it never vetoes), so the player must be told the
+   * length of the file it is about to play, not the length of the song it
+   * asked for. Null only when Jellyfin has not probed the file yet.
+   */
+  durationMs: number | null;
   score: number;
+}
+
+function durationOf(item: JellyfinAudioItem): number | null {
+  return item.RunTimeTicks ? Math.round(item.RunTimeTicks / 10_000) : null;
 }
 
 export interface PlayerStatus {
@@ -303,6 +318,7 @@ export class JellyfinBridge {
       albumId: ranked[0].item.AlbumId ?? null,
       container: ranked[0].item.Container ?? null,
       path: ranked[0].item.Path ?? null,
+      durationMs: durationOf(ranked[0].item),
       score: ranked[0].score,
     };
   }
@@ -320,7 +336,12 @@ export class JellyfinBridge {
     }
     for (const candidate of candidates) {
       const item = this.byPath.get(candidate);
-      if (item) return { itemId: item.Id, albumId: item.AlbumId ?? null, container: item.Container ?? null, path: item.Path ?? null, score: 100 };
+      if (item) {
+        return {
+          itemId: item.Id, albumId: item.AlbumId ?? null, container: item.Container ?? null,
+          path: item.Path ?? null, durationMs: durationOf(item), score: 100,
+        };
+      }
     }
     return null;
   }
