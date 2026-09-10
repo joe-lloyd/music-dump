@@ -121,6 +121,7 @@ test('indexes Jellyfin audio, matches safely, and forwards range requests', asyn
     assert.equal(match?.itemId, 'right');
     assert.equal(match?.container, 'flac');
     assert.equal(match?.path, '/eliot-media/music/Local Signals/track.flac');
+    assert.equal(match?.durationMs, 252_000, 'the file length is what the position bar is drawn against');
     const response = await bridge.stream(match!.itemId, 'bytes=0-3');
     assert.equal(response.status, 206);
     assert.equal(seenRange, 'bytes=0-3');

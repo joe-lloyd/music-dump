@@ -1155,11 +1155,15 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
         track: publicTrack,
       };
     }
+    // The player draws its position bar against duration_ms, so it has to be
+    // the length of the file that will stream, not Spotify's length for the
+    // track. They differ by whole seconds whenever the local rip is another
+    // edition, and then the bar ended before the song did.
     return {
       available: true,
       streamUrl: `/api/player/stream?id=${encodeURIComponent(track.id)}`,
       confidence: match.score,
-      track: publicTrack,
+      track: { ...publicTrack, duration_ms: match.durationMs ?? publicTrack.duration_ms },
     };
   },
 
