@@ -126,6 +126,18 @@ export function albumMatchKey(artist: string | null | undefined, album: string |
   return provenanceKey(artist, bare);
 }
 
+/**
+ * Lookup key for a release name on its own, without the artist.
+ *
+ * A compilation's tracks are credited to their own artists while the record is
+ * filed under "Various Artists", so the artist half of `albumMatchKey` cannot
+ * be part of a comparison between a reference album and the file that claims
+ * to be on it. The bracket strip is the same one, for the same reason.
+ */
+export function albumNameKey(album: string | null | undefined): string {
+  return normalizeMusicText(String(album ?? '').replace(/\s*[([].*$/, ''));
+}
+
 export const LIB_ALBUM_PREFIX = 'libalbum-';
 export const LIB_TRACK_PREFIX = 'libtrack-';
 
@@ -599,12 +611,20 @@ export class ProvenanceStore {
    * app pulled from YouTube were never in Lidarr and so have no recording id
    * at all. Name matching is the only handle on those, and `match_key` is
    * already indexed for exactly this shape of question.
+   *
+   * Pass `album` when the caller knows which record it is asking about. A
+   * recording filed under both its original album and a compilation matches
+   * twice, and without the hint the bigger file wins - which is how a track
+   * on one album ended up showing another album's cover art.
    */
-  byMatchKey(key: string): ProvenanceRow | null {
-    return (this.handle().prepare(`
+  byMatchKey(key: string, album?: string | null): ProvenanceRow | null {
+    if (!key) return null;
+    const rows = this.handle().prepare(`
       SELECT * FROM track_provenance WHERE match_key = ?
-      ORDER BY size_bytes DESC LIMIT 1
-    `).get(key) as ProvenanceRow | undefined) ?? null;
+      ORDER BY size_bytes DESC
+    `).all(key) as ProvenanceRow[];
+    const want = albumNameKey(album);
+    return (want && rows.find((row) => albumNameKey(row.album) === want)) || rows[0] || null;
   }
 
   /** Paths already scanned, with mtime+size, so the scanner can skip them. */
