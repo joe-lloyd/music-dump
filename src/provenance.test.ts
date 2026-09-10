@@ -224,3 +224,26 @@ test('summary counts by source and by derived tier', () => {
     assert.ok(summary.scannedAt);
   });
 });
+
+test('a title that exists on two records resolves to the album that was asked for', () => {
+  withStore((store) => {
+    store.upsert([
+      // The compilation copy is the bigger file, so size alone picks it.
+      row({
+        path: '/lib/Porcupine Tree/On the Sunday of Life (1992) [Album]/09 Fadeaway.flac',
+        artist: 'Porcupine Tree', title: 'Fadeaway', album: 'On the Sunday of Life',
+        size_bytes: 61_000_000,
+      }),
+      row({
+        path: '/lib/Porcupine Tree/Stars Die (2002) [Album]/03 Fadeaway.flac',
+        artist: 'Porcupine Tree', title: 'Fadeaway', album: 'Stars Die',
+        size_bytes: 34_000_000,
+      }),
+    ]);
+    const key = provenanceKey('Porcupine Tree', 'Fadeaway');
+    assert.match(store.byMatchKey(key, 'Stars Die (Remaster)')!.path, /Stars Die/);
+    // No album named, or a record the library does not hold: still owned, best copy.
+    assert.match(store.byMatchKey(key)!.path, /On the Sunday of Life/);
+    assert.match(store.byMatchKey(key, 'Coma Divine')!.path, /On the Sunday of Life/);
+  });
+});

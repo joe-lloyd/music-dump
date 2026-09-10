@@ -514,7 +514,7 @@ function continuationAlbumId(track: TasteTrack, albums?: ContinuationAlbum[]): s
   // The indexed artist+title lookup keeps the ordinary resolve path cheap.
   // Confirm the album too: the same song can exist on an original record and
   // a compilation, and the player should continue from the one it named.
-  const byTitle = provenance.byMatchKey(provenanceKey(track.artists, track.name));
+  const byTitle = provenance.byMatchKey(provenanceKey(track.artists, track.name), track.album);
   if (byTitle && (!track.album || albumMatchKey(byTitle.artist, byTitle.album) === albumMatchKey(track.artists, track.album))) {
     return libAlbumId(byTitle.path);
   }
@@ -904,7 +904,7 @@ function referenceAlbumView(releaseGroupMbid: string): Record<string, unknown> |
   const coverage = upgrades.albumCoverage(releaseGroupMbid);
   let owned = 0;
   const tracks = album.tracks.map((track) => {
-    const file = provenance.byMatchKey(provenanceKey(album.artist, track.title));
+    const file = provenance.byMatchKey(provenanceKey(album.artist, track.title), album.title);
     const job = coverage.get(`${track.disc}:${track.position}`);
     if (file) owned += 1;
     return {
@@ -2198,7 +2198,7 @@ const server = http.createServer(async (req, res) => {
           if (!track) throw new Error('album track no longer exists');
           const queued = upgrades.findQueued(track.artists ?? '', track.name);
           if (queued) { jobs.push(publicUpgrade(queued)); continue; }
-          const owned = provenance.byMatchKey(provenanceKey(track.artists ?? '', track.name));
+          const owned = provenance.byMatchKey(provenanceKey(track.artists ?? '', track.name), track.album);
           let match = null;
           if (!owned) { try { match = await resolveMatch(track); } catch { /* worker checks the filesystem before intake */ } }
           jobs.push(publicUpgrade(upgrades.create({
@@ -2774,7 +2774,7 @@ const server = http.createServer(async (req, res) => {
 
         // On disk already but never queued - the lossless hunt can start from
         // the file itself, no download needed.
-        const row = provenance.byMatchKey(provenanceKey(artist, title));
+        const row = provenance.byMatchKey(provenanceKey(artist, title), album);
         if (row) {
           if (isLosslessCodec(row.codec)) {
             json(res, 200, { outcome: 'already-lossless', detail: 'Already lossless in the library' });
