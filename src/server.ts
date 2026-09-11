@@ -1,3 +1,4 @@
+import { LikesStore } from './likes.ts';
 import { PlaylistStore } from './playlists.ts';
 // Web UI over the read-only taste DB plus small, separate mutable stores for
 // player history and the lossless-upgrade queue. Zero runtime dependencies.
@@ -51,6 +52,7 @@ const lyrics = new LyricsService();
 const appPlays = new PlaysStore();
 const upgrades = new UpgradeStore();
 const localPlaylists = new PlaylistStore();
+const appLikes = new LikesStore();
 const provenance = new ProvenanceStore();
 const shelf = new ShelfStore();
 const discogs = new DiscogsClient();
@@ -935,6 +937,29 @@ function referenceAlbumView(releaseGroupMbid: string): Record<string, unknown> |
   };
 }
 
+function recordQuery(sql: string, ...args: (string | number)[]) {
+  return query(sql, ...args).filter((row): row is Record<string, unknown> => row !== null && typeof row === 'object' && !Array.isArray(row));
+}
+
+function likedTracks() {
+  const spotify = recordQuery(`
+    SELECT t.id, t.name, t.duration_ms, t.popularity, lt.added_at, lt.removed_at,
+           al.name AS album, al.id AS album_id, al.image_url, al.release_date,
+           (SELECT group_concat(a.name, ', ' ORDER BY ta.position)
+              FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
+             WHERE ta.track_id = t.id) AS artists
+    FROM liked_tracks lt JOIN tracks t ON t.id = lt.track_id
+    LEFT JOIN albums al ON al.id = t.album_id
+    ORDER BY lt.added_at DESC`);
+  const merged = new Map<string, Record<string, unknown>>(spotify.filter((t) => !t.removed_at).map(t => [String(t.id), { ...t, liked: 1 }]));
+  for (const choice of appLikes.choices()) {
+    if (!choice.liked) { merged.delete(choice.track_id); continue; }
+    const track = tasteTrack(choice.track_id);
+    if (track) merged.set(choice.track_id, { ...track, added_at: choice.added_at, liked: 1 });
+  }
+  return [...merged.values()].sort((a, b) => String(b.added_at).localeCompare(String(a.added_at)));
+}
+
 function tasteTrack(id: string): TasteTrack | null {
   if (id.startsWith('setlist:')) {
     const entry = localPlaylists.track(id);
@@ -1402,6 +1427,12 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
 
   '/api/artist': (params) => {
     const id = params.get('id') ?? '';
+    if (id.startsWith('local-artist:')) {
+      const name = id.slice('local-artist:'.length);
+      const albums = provenance.albums().filter(a => a.artists === name);
+      return { artist: albums.length ? { id, name } : null, albums, liked: likedTracks().filter(t => t.artists === name), topRanks: [] };
+    }
+
     return {
       artist: query(`SELECT * FROM artists WHERE id = ?`, id)[0] ?? null,
       albums: query(`
@@ -1537,15 +1568,7 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
     };
   },
 
-  '/api/tracks': () => query(`
-    SELECT t.id, t.name, t.duration_ms, t.popularity, lt.added_at, lt.removed_at,
-           al.name AS album, al.id AS album_id, al.image_url, al.release_date,
-           (SELECT group_concat(a.name, ', ' ORDER BY ta.position)
-              FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
-             WHERE ta.track_id = t.id) AS artists
-    FROM liked_tracks lt JOIN tracks t ON t.id = lt.track_id
-    LEFT JOIN albums al ON al.id = t.album_id
-    ORDER BY lt.added_at DESC`),
+  '/api/tracks': () => likedTracks(),
 
   // Music imported through the app, for the Songs page's downloads section.
   '/api/local-tracks': () => upgrades.localTracks().map((track) => ({
@@ -1818,10 +1841,36 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
       LIMIT ?2 OFFSET ?3`, q, limit, offset);
   },
 
-  // Whole track library grouped by album: a page of albums, each with its
-  // tracks nested. Search matches album, artist, or track names.
-  // Flat track search across the WHOLE library, not just liked songs. The
-  // Songs page shows liked tracks by default; typing reaches everything.
+  // Search synced metadata and local music without contacting Spotify.
+  '/api/search': (params) => {
+    const term = (params.get('q') ?? '').trim().slice(0, 200);
+    const empty = { songs: [], artists: [], albums: [], playlists: [] };
+    if (term.length < 2) return empty;
+    const needle = term.toLocaleLowerCase();
+    const matches = (row: { name?: unknown; artists?: unknown; description?: unknown }) => [row.name, row.artists, row.description].some(value => typeof value === 'string' && value.toLocaleLowerCase().includes(needle));
+    const q = '%' + term.replace(/[\\%_]/g, '\\$&') + '%';
+    const artists = recordQuery(`SELECT id, name, image_url FROM artists WHERE name LIKE ? ESCAPE '\\' ORDER BY name LIMIT 40`, q);
+    const albums = recordQuery(`SELECT al.id, al.name, al.image_url, al.release_date,
+      (SELECT group_concat(a.name, ', ') FROM album_artists aa JOIN artists a ON a.id = aa.artist_id WHERE aa.album_id = al.id) AS artists
+      FROM albums al WHERE al.name LIKE ?1 ESCAPE '\\' OR artists LIKE ?1 ESCAPE '\\' ORDER BY al.name LIMIT 40`, q);
+    const songs = recordQuery(`SELECT t.id, t.name, t.duration_ms, t.album_id, al.name AS album, al.image_url,
+      (SELECT group_concat(a.name, ', ') FROM track_artists ta JOIN artists a ON a.id = ta.artist_id WHERE ta.track_id = t.id) AS artists
+      FROM tracks t LEFT JOIN albums al ON al.id = t.album_id
+      WHERE t.name LIKE ?1 ESCAPE '\\' OR artists LIKE ?1 ESCAPE '\\' OR al.name LIKE ?1 ESCAPE '\\'
+      ORDER BY t.popularity DESC, t.name LIMIT 100`, q);
+    const localSongs = [...provenance.searchTrackIds(term).map(id => provenance.trackById(id)).filter(track => track !== null).map(libAsTasteTrack), ...upgrades.localTracks().filter(matches).map(localAsTasteTrack)];
+    const libraryAlbums = provenance.albums();
+    const localAlbums = libraryAlbums.filter(matches).slice(0, 40).map(a => ({ ...a, downloaded: 1 }));
+    const playlists = recordQuery(`SELECT id, name, description FROM playlists WHERE removed_at IS NULL AND name LIKE ? ESCAPE '\\' ORDER BY name LIMIT 40`, q);
+    const unique = <T extends { id?: unknown }>(rows: T[], limit: number) => [...new Map(rows.map(r => [r.id, r])).values()].slice(0, limit);
+    const names = new Set(artists.map(a => String(a.name).toLocaleLowerCase()));
+    const localArtists = [...new Set(libraryAlbums.map(a => a.artists))]
+      .filter(name => name.toLocaleLowerCase().includes(needle) && !names.has(name.toLocaleLowerCase()))
+      .map(name => ({ id: 'local-artist:' + name, name }));
+    return { songs: unique([...songs, ...localSongs], 100), artists: [...artists, ...localArtists].slice(0, 40), albums: unique([...albums, ...localAlbums], 40),
+      playlists: unique([...localPlaylists.list().filter(matches), ...playlists], 40) };
+  },
+
   '/api/search-songs': (params) => {
     const term = (params.get('q') ?? '').trim();
     if (term.length < 2) return [];
@@ -2161,6 +2210,17 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', 'http://localhost');
   try {
+    if (url.pathname === '/api/likes') {
+      if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }).end(); return; }
+      try {
+        const body = await readJson(req);
+        if (typeof body.id !== 'string' || typeof body.liked !== 'boolean') throw new Error('Provide a track ID and liked boolean');
+        if (!tasteTrack(body.id)) { json(res, 404, { error: 'Track not found' }); return; }
+        appLikes.set(body.id, body.liked);
+        json(res, 200, { id: body.id, liked: body.liked });
+      } catch (error) { json(res, 422, { error: (error as Error).message }); }
+      return;
+    }
     if (url.pathname === '/api/local-playlists') {
       if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }).end(); return; }
       try {
