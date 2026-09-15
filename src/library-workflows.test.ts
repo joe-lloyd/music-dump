@@ -10,16 +10,31 @@ import http from 'node:http';
 import { ProvenanceStore } from './provenance.ts';
 import { TasteDb } from './db.ts';
 
-test('HTTP: local playlist CRUD, album intake and repeated requests', { timeout: 30000 }, async () => {
+test('HTTP: release retention, local playlists, album intake and repeated requests', { timeout: 30000 }, async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'music-workflows-'));
   const dbFile = path.join(dir, 'taste.db');
   const db = new TasteDb(dbFile);
-  db.run("INSERT INTO artists (id, name) VALUES ('artist', 'Porcupine Tree')");
-  db.run("INSERT INTO albums (id, name) VALUES ('album', 'Test album')");
+  db.run("INSERT INTO artists (id, name, is_followed) VALUES ('artist', 'Porcupine Tree', 1)");
+  db.run("INSERT INTO albums (id, name, release_date) VALUES ('album', 'Test album', date('now', '-31 days'))");
   db.run("INSERT INTO album_artists VALUES ('album', 'artist', 0)");
   for (const [id, name, number] of [['one', 'Even Less', 1], ['two', 'Dark Matter', 2]]) {
     db.run('INSERT INTO tracks (id, name, album_id, track_number, disc_number, duration_ms) VALUES (?, ?, ?, ?, 1, 180000)', id, name, 'album', number);
     db.run('INSERT INTO track_artists VALUES (?, ?, 0)', id, 'artist');
+  }
+  db.run(`CREATE TABLE lidarr_release (
+    foreign_album_id TEXT PRIMARY KEY, artist_name TEXT, title TEXT, album_type TEXT,
+    release_date TEXT, cover_url TEXT, track_files INTEGER, total_tracks INTEGER,
+    folder TEXT
+  )`);
+  for (const [id, title, offset] of [
+    ['stale', 'Thirty-one days old', '-31 days'],
+    ['boundary', 'Exactly thirty days old', '-30 days'],
+    ['today', 'Released today', '0 days'],
+    ['future', 'Still upcoming', '+10 days'],
+  ]) {
+    db.run(`INSERT INTO lidarr_release
+      (foreign_album_id, artist_name, title, album_type, release_date, track_files, total_tracks)
+      VALUES (?, 'Porcupine Tree', ?, 'Album', date('now', ?), 0, 8)`, id, title, offset);
   }
   db.db.close();
   const scanned = new ProvenanceStore(path.join(dir, 'provenance.db'));
@@ -62,6 +77,18 @@ test('HTTP: local playlist CRUD, album intake and repeated requests', { timeout:
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     assert.match(output, /taste-db ui on/);
+    const releases = await (await fetch(base + '/api/releases')).json() as {
+      releases: { name: string }[]; counts: { total: number; upcoming: number };
+    };
+    assert.deepEqual(releases.releases.map(release => release.name),
+      ['Still upcoming', 'Released today', 'Exactly thirty days old']);
+    assert.deepEqual(releases.counts, {
+      total: 3, fromLidarr: 3, fromSpotify: 0, upcoming: 1, missing: 3,
+    });
+    const artist = await (await fetch(base + '/api/artist?id=artist')).json() as {
+      albums: { name: string }[];
+    };
+    assert.equal(artist.albums.some(album => album.name === 'Test album'), true);
     const playlists = await (await fetch(base + '/api/playlists')).json();
     assert.ok(Array.isArray(playlists));
     const seed = playlists.find((p: { name: string }) => p.name === 'Voyage 35');
