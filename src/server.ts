@@ -1,3 +1,4 @@
+import { LIKE_KINDS, LikesStore, type LikeKind } from './likes.ts';
 import { PlaylistStore } from './playlists.ts';
 // Web UI over the read-only taste DB plus small, separate mutable stores for
 // player history and the lossless-upgrade queue. Zero runtime dependencies.
@@ -51,6 +52,7 @@ const lyrics = new LyricsService();
 const appPlays = new PlaysStore();
 const upgrades = new UpgradeStore();
 const localPlaylists = new PlaylistStore();
+const appLikes = new LikesStore();
 const provenance = new ProvenanceStore();
 const shelf = new ShelfStore();
 const discogs = new DiscogsClient();
@@ -935,6 +937,253 @@ function referenceAlbumView(releaseGroupMbid: string): Record<string, unknown> |
   };
 }
 
+function recordQuery(sql: string, ...args: (string | number)[]) {
+  return query(sql, ...args).filter((row): row is Record<string, unknown> => row !== null && typeof row === 'object' && !Array.isArray(row));
+}
+
+function likedTracks() {
+  const spotify = recordQuery(`
+    SELECT t.id, t.name, t.duration_ms, t.popularity, lt.added_at, lt.removed_at,
+           al.name AS album, al.id AS album_id, al.image_url, al.release_date,
+           (SELECT group_concat(a.name, ', ' ORDER BY ta.position)
+              FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
+             WHERE ta.track_id = t.id) AS artists
+    FROM liked_tracks lt JOIN tracks t ON t.id = lt.track_id
+    LEFT JOIN albums al ON al.id = t.album_id
+    ORDER BY lt.added_at DESC`);
+  const merged = new Map<string, Record<string, unknown>>(spotify.filter((t) => !t.removed_at).map(t => [String(t.id), { ...t, liked: 1 }]));
+  for (const choice of appLikes.choices()) {
+    if (!choice.liked) { merged.delete(choice.id); continue; }
+    const track = tasteTrack(choice.id);
+    if (track) merged.set(choice.id, { ...track, added_at: choice.added_at, liked: 1 });
+  }
+  return [...merged.values()].sort((a, b) => String(b.added_at).localeCompare(String(a.added_at)));
+}
+
+/**
+ * A like on an album or an artist means the same as one on a song: it is in
+ * the favourites list, and the archive goes and gets it. Spotify's saved and
+ * followed flags seed the list; app choices override them, as with tracks.
+ */
+function likedAlbums() {
+  const rows: Record<string, unknown>[] = [
+    // Locally imported albums are real music in the library, so they belong
+    // in the same grid as saved Spotify albums - flagged downloaded, because
+    // by definition the file is already on disk.
+    ...localAlbums().map((album) => ({
+      id: album.id,
+      name: album.name,
+      artists: album.artists,
+      album_type: 'local',
+      release_date: (album.added_at || '').slice(0, 10),
+      image_url: null,
+      saved_at: album.added_at,
+      total_tracks: album.total_tracks,
+      is_saved: 1,
+      unsaved_at: null,
+      removed_at: null,
+      downloaded: 1,
+      local: 1,
+    })),
+    ...query(`
+    SELECT al.id, al.name, al.album_type, al.release_date, al.label, al.popularity,
+           al.image_url, al.saved_at, al.total_tracks, al.is_saved, al.unsaved_at, al.removed_at,
+           (SELECT downloaded FROM album_download_status ds WHERE ds.album_id = al.id) AS downloaded,
+           (SELECT group_concat(a.name, ', ' ORDER BY aa.position)
+              FROM album_artists aa JOIN artists a ON a.id = aa.artist_id
+             WHERE aa.album_id = al.id) AS artists
+    FROM albums al WHERE al.is_saved = 1 OR al.unsaved_at IS NOT NULL
+    ORDER BY al.saved_at DESC`) as Record<string, unknown>[],
+    ];
+  for (const row of rows) row.liked = row.local ? 0 : Number(Boolean(row.is_saved) && !row.unsaved_at);
+  const merged = new Map(rows.map((row) => [String(row.id), row]));
+  for (const choice of appLikes.choices('album')) {
+    const row = merged.get(choice.id);
+    if (!choice.liked) {
+      // An imported album is real music on disk, so it keeps its card; a
+      // Spotify save that was un-liked here leaves the list like a song does.
+      if (row && row.local) row.liked = 0; else merged.delete(choice.id);
+      continue;
+    }
+    if (row) { row.liked = 1; continue; }
+    const card = albumCard(choice.id);
+    if (card) merged.set(choice.id, { ...card, liked: 1, is_saved: 1, saved_at: choice.added_at });
+  }
+  return [...merged.values()];
+}
+
+function likedArtists() {
+  const rows = query(`
+    SELECT a.id, a.name, a.genres, a.popularity, a.followers, a.image_url, a.is_followed,
+           a.unfollowed_at, a.removed_at,
+           (SELECT COUNT(*) FROM track_artists ta JOIN liked_tracks lt ON lt.track_id = ta.track_id
+             WHERE ta.artist_id = a.id AND lt.removed_at IS NULL) AS liked_count,
+           (SELECT MIN(rank) FROM top_artists t WHERE t.artist_id = a.id AND t.time_range = 'medium_term') AS top_rank
+    FROM artists a
+    WHERE a.is_followed = 1 OR liked_count > 0 OR top_rank IS NOT NULL OR a.unfollowed_at IS NOT NULL
+    ORDER BY liked_count DESC, a.followers DESC`) as Record<string, unknown>[];
+  for (const row of rows) row.liked = Number(Boolean(row.is_followed) && !row.unfollowed_at);
+  const merged = new Map(rows.map((row) => [String(row.id), row]));
+  for (const choice of appLikes.choices('artist')) {
+    const row = merged.get(choice.id);
+    if (row) { row.liked = Number(choice.liked); continue; }
+    if (!choice.liked) continue;
+    const artist = artistDetail(choice.id).artist;
+    if (artist) merged.set(choice.id, { ...artist, liked: 1, liked_count: 0, top_rank: null });
+  }
+  return [...merged.values()];
+}
+
+function albumDetail(id: string) {
+  return api['/api/album'](new URLSearchParams({ id })) as {
+    album: Record<string, unknown> | null; artists: { name: string }[]; tracks: LikedTrackShape[];
+  };
+}
+
+function artistDetail(id: string) {
+  return api['/api/artist'](new URLSearchParams({ id })) as {
+    artist: Record<string, unknown> | null; albums: { id: string }[];
+  };
+}
+
+function albumCard(id: string): Record<string, unknown> | null {
+  const detail = albumDetail(id);
+  if (!detail.album) return null;
+  return { ...detail.album, artists: detail.artists.map((a) => a.name).join(', ') };
+}
+
+const isLikeKind = (value: unknown): value is LikeKind =>
+  typeof value === 'string' && (LIKE_KINDS as readonly string[]).includes(value);
+
+type LikedTrackShape = { name: string; artists?: string | null; album?: string | null; duration_ms?: number | null };
+
+function likedEntityExists(kind: LikeKind, id: string): boolean {
+  if (kind === 'track') return tasteTrack(id) !== null;
+  if (kind === 'album') return albumDetail(id).album !== null;
+  return artistDetail(id).artist !== null;
+}
+
+/** Every song a like covers: the song, the album's listing, or the whole discography. */
+function tracksCoveredBy(kind: LikeKind, id: string): LikedTrackShape[] {
+  if (kind === 'track') { const track = tasteTrack(id); return track ? [track] : []; }
+  if (kind === 'album') return albumTracks(id);
+  return artistDetail(id).albums.flatMap((album) => albumTracks(String(album.id)));
+}
+
+/** A Spotify album's track rows carry no album name of their own; the job should. */
+function albumTracks(id: string): LikedTrackShape[] {
+  const detail = albumDetail(id);
+  const album = detail.album?.name == null ? null : String(detail.album.name);
+  return (detail.tracks ?? []).map((track) => ({ ...track, album: track.album ?? album }));
+}
+
+type GrabCounts = { queued: number; skipped: number; lossless: number };
+
+/**
+ * Ask the archive for one favourited song. The same escalation as pressing
+ * play on something we lack, with one difference: a job that already gave
+ * up is left alone. The sweep comes round every few hours, and without this
+ * it would re-fetch every song the FLAC hunt had exhausted, forever.
+ */
+function grabTrack(track: LikedTrackShape): keyof GrabCounts {
+  const artist = String(track.artists ?? '').replace(/[\r\n]/g, ' ').trim();
+  const title = String(track.name ?? '').replace(/[\r\n]/g, ' ').trim();
+  if (!artist || !title) return 'skipped';
+  const last = upgrades.latest(artist, title);
+  if (last && (last.status === 'exhausted' || (last.status === 'cancelled' && !last.current_path))) return 'skipped';
+  // Already on the full path: promoting it again would only touch a timestamp.
+  if (last && last.auto_upgrade && last.status !== 'cancelled') return 'skipped';
+  const result = wantTrack({ artist, title, album: track.album ?? null, durationMs: track.duration_ms ?? null });
+  if (result.outcome === 'already-lossless') return 'lossless';
+  if (result.outcome === 'already-wanted') return 'skipped';
+  return 'queued';
+}
+
+function grabLiked(kind: LikeKind, id: string, counts: GrabCounts = { queued: 0, skipped: 0, lossless: 0 }): GrabCounts {
+  for (const track of tracksCoveredBy(kind, id)) counts[grabTrack(track)] += 1;
+  return counts;
+}
+
+/**
+ * Walk everything favourited in the app and make sure the archive is after
+ * it. Runs after each like and on a timer, because a favourited artist's
+ * discography keeps growing after the click: the crawl finds more albums,
+ * and new releases land.
+ */
+let sweepingLikes = false;
+function sweepLikes(): GrabCounts & { likes: number } {
+  const counts = { queued: 0, skipped: 0, lossless: 0, likes: 0 };
+  if (sweepingLikes) return counts;
+  sweepingLikes = true;
+  try {
+    for (const kind of LIKE_KINDS) {
+      for (const choice of appLikes.liked(kind)) {
+        counts.likes += 1;
+        grabLiked(kind, choice.id, counts);
+      }
+    }
+  } finally { sweepingLikes = false; }
+  return counts;
+}
+
+type WantInput = {
+  artist: string; title: string; album?: string | null; durationMs?: number | null;
+  recordingMbid?: string | null; releaseMbid?: string | null;
+};
+type WantResult = {
+  outcome: 'promoted' | 'already-wanted' | 'already-lossless' | 'upgrading' | 'fetching';
+  job?: UpgradeJob; detail: string;
+};
+
+/**
+ * Three states to reconcile, and it is idempotent across all of them:
+ *   - nothing queued  -> fetch it from YouTube, lossless hunt enabled
+ *   - parked by radio -> promote it; the file is already on disk
+ *   - on disk, lossy, no job -> queue the lossless hunt from the file
+ */
+function wantTrack({ artist, title, album = null, durationMs = null, recordingMbid = null, releaseMbid = null }: WantInput): WantResult {
+  const existing = upgrades.findQueued(artist, title);
+  if (existing) {
+    const { job, changed } = upgrades.promote(existing.id);
+    return {
+      outcome: changed ? 'promoted' : 'already-wanted',
+      job,
+      detail: changed ? 'Queued for a lossless upgrade' : `Already ${job.status.replace('_', ' ')}`,
+    };
+  }
+
+  // On disk already but never queued - the lossless hunt can start from
+  // the file itself, no download needed.
+  const row = provenance.byMatchKey(provenanceKey(artist, title), album);
+  if (row) {
+    if (isLosslessCodec(row.codec)) return { outcome: 'already-lossless', detail: 'Already lossless in the library' };
+    const job = upgrades.create({
+      artist, title, album: row.album ?? album,
+      durationMs: row.duration_ms ?? durationMs,
+      currentPath: row.path, currentCodec: row.codec,
+      autoUpgrade: true,
+    });
+    return { outcome: 'upgrading', job, detail: 'Hunting for a lossless copy' };
+  }
+
+  const job = upgrades.create({
+    artist, title, album, durationMs,
+    sourceUrl: `ytsearch5:${artist} ${title}`,
+    downloader: 'yt-dlp',
+    sourceMode: 'single',
+    // Deliberate: you asked for this one, so it gets the full path -
+    // YouTube now so it is playable, Soulseek after for the real copy.
+    autoUpgrade: true,
+    recordingMbid,
+    releaseMbid,
+  });
+  // The song is on its way; which record it is off is a separate,
+  // slower question. Answer it in the background so the click is not
+  // waiting on MusicBrainz.
+  fillAlbumBlanks();
+  return { outcome: 'fetching', job, detail: 'Getting it from YouTube now' };
+}
+
 function tasteTrack(id: string): TasteTrack | null {
   if (id.startsWith('setlist:')) {
     const entry = localPlaylists.track(id);
@@ -1390,18 +1639,16 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
     };
   },
 
-  '/api/artists': () => query(`
-    SELECT a.id, a.name, a.genres, a.popularity, a.followers, a.image_url, a.is_followed,
-           a.unfollowed_at, a.removed_at,
-           (SELECT COUNT(*) FROM track_artists ta JOIN liked_tracks lt ON lt.track_id = ta.track_id
-             WHERE ta.artist_id = a.id AND lt.removed_at IS NULL) AS liked_count,
-           (SELECT MIN(rank) FROM top_artists t WHERE t.artist_id = a.id AND t.time_range = 'medium_term') AS top_rank
-    FROM artists a
-    WHERE a.is_followed = 1 OR liked_count > 0 OR top_rank IS NOT NULL OR a.unfollowed_at IS NOT NULL
-    ORDER BY liked_count DESC, a.followers DESC`),
+  '/api/artists': () => likedArtists(),
 
   '/api/artist': (params) => {
     const id = params.get('id') ?? '';
+    if (id.startsWith('local-artist:')) {
+      const name = id.slice('local-artist:'.length);
+      const albums = provenance.albums().filter(a => a.artists === name);
+      return { artist: albums.length ? { id, name } : null, albums, liked: likedTracks().filter(t => t.artists === name), topRanks: [] };
+    }
+
     return {
       artist: query(`SELECT * FROM artists WHERE id = ?`, id)[0] ?? null,
       albums: query(`
@@ -1537,15 +1784,7 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
     };
   },
 
-  '/api/tracks': () => query(`
-    SELECT t.id, t.name, t.duration_ms, t.popularity, lt.added_at, lt.removed_at,
-           al.name AS album, al.id AS album_id, al.image_url, al.release_date,
-           (SELECT group_concat(a.name, ', ' ORDER BY ta.position)
-              FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
-             WHERE ta.track_id = t.id) AS artists
-    FROM liked_tracks lt JOIN tracks t ON t.id = lt.track_id
-    LEFT JOIN albums al ON al.id = t.album_id
-    ORDER BY lt.added_at DESC`),
+  '/api/tracks': () => likedTracks(),
 
   // Music imported through the app, for the Songs page's downloads section.
   '/api/local-tracks': () => upgrades.localTracks().map((track) => ({
@@ -1768,35 +2007,7 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
     })(),
   }),
 
-  '/api/albums': () => [
-    // Locally imported albums are real music in the library, so they belong
-    // in the same grid as saved Spotify albums - flagged downloaded, because
-    // by definition the file is already on disk.
-    ...localAlbums().map((album) => ({
-      id: album.id,
-      name: album.name,
-      artists: album.artists,
-      album_type: 'local',
-      release_date: (album.added_at || '').slice(0, 10),
-      image_url: null,
-      saved_at: album.added_at,
-      total_tracks: album.total_tracks,
-      is_saved: 1,
-      unsaved_at: null,
-      removed_at: null,
-      downloaded: 1,
-      local: 1,
-    })),
-    ...query(`
-    SELECT al.id, al.name, al.album_type, al.release_date, al.label, al.popularity,
-           al.image_url, al.saved_at, al.total_tracks, al.is_saved, al.unsaved_at, al.removed_at,
-           (SELECT downloaded FROM album_download_status ds WHERE ds.album_id = al.id) AS downloaded,
-           (SELECT group_concat(a.name, ', ' ORDER BY aa.position)
-              FROM album_artists aa JOIN artists a ON a.id = aa.artist_id
-             WHERE aa.album_id = al.id) AS artists
-    FROM albums al WHERE al.is_saved = 1 OR al.unsaved_at IS NOT NULL
-    ORDER BY al.saved_at DESC`) as Record<string, unknown>[],
-  ],
+  '/api/albums': () => likedAlbums(),
 
   // Everything the discography crawl knows that isn't in the saved section.
   // Server-side paging + search — this grows to thousands of rows.
@@ -1818,10 +2029,36 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
       LIMIT ?2 OFFSET ?3`, q, limit, offset);
   },
 
-  // Whole track library grouped by album: a page of albums, each with its
-  // tracks nested. Search matches album, artist, or track names.
-  // Flat track search across the WHOLE library, not just liked songs. The
-  // Songs page shows liked tracks by default; typing reaches everything.
+  // Search synced metadata and local music without contacting Spotify.
+  '/api/search': (params) => {
+    const term = (params.get('q') ?? '').trim().slice(0, 200);
+    const empty = { songs: [], artists: [], albums: [], playlists: [] };
+    if (term.length < 2) return empty;
+    const needle = term.toLocaleLowerCase();
+    const matches = (row: { name?: unknown; artists?: unknown; description?: unknown }) => [row.name, row.artists, row.description].some(value => typeof value === 'string' && value.toLocaleLowerCase().includes(needle));
+    const q = '%' + term.replace(/[\\%_]/g, '\\$&') + '%';
+    const artists = recordQuery(`SELECT id, name, image_url FROM artists WHERE name LIKE ? ESCAPE '\\' ORDER BY name LIMIT 40`, q);
+    const albums = recordQuery(`SELECT al.id, al.name, al.image_url, al.release_date,
+      (SELECT group_concat(a.name, ', ') FROM album_artists aa JOIN artists a ON a.id = aa.artist_id WHERE aa.album_id = al.id) AS artists
+      FROM albums al WHERE al.name LIKE ?1 ESCAPE '\\' OR artists LIKE ?1 ESCAPE '\\' ORDER BY al.name LIMIT 40`, q);
+    const songs = recordQuery(`SELECT t.id, t.name, t.duration_ms, t.album_id, al.name AS album, al.image_url,
+      (SELECT group_concat(a.name, ', ') FROM track_artists ta JOIN artists a ON a.id = ta.artist_id WHERE ta.track_id = t.id) AS artists
+      FROM tracks t LEFT JOIN albums al ON al.id = t.album_id
+      WHERE t.name LIKE ?1 ESCAPE '\\' OR artists LIKE ?1 ESCAPE '\\' OR al.name LIKE ?1 ESCAPE '\\'
+      ORDER BY t.popularity DESC, t.name LIMIT 100`, q);
+    const localSongs = [...provenance.searchTrackIds(term).map(id => provenance.trackById(id)).filter(track => track !== null).map(libAsTasteTrack), ...upgrades.localTracks().filter(matches).map(localAsTasteTrack)];
+    const libraryAlbums = provenance.albums();
+    const localAlbums = libraryAlbums.filter(matches).slice(0, 40).map(a => ({ ...a, downloaded: 1 }));
+    const playlists = recordQuery(`SELECT id, name, description FROM playlists WHERE removed_at IS NULL AND name LIKE ? ESCAPE '\\' ORDER BY name LIMIT 40`, q);
+    const unique = <T extends { id?: unknown }>(rows: T[], limit: number) => [...new Map(rows.map(r => [r.id, r])).values()].slice(0, limit);
+    const names = new Set(artists.map(a => String(a.name).toLocaleLowerCase()));
+    const localArtists = [...new Set(libraryAlbums.map(a => a.artists))]
+      .filter(name => name.toLocaleLowerCase().includes(needle) && !names.has(name.toLocaleLowerCase()))
+      .map(name => ({ id: 'local-artist:' + name, name }));
+    return { songs: unique([...songs, ...localSongs], 100), artists: [...artists, ...localArtists].slice(0, 40), albums: unique([...albums, ...localAlbums], 40),
+      playlists: unique([...localPlaylists.list().filter(matches), ...playlists], 40) };
+  },
+
   '/api/search-songs': (params) => {
     const term = (params.get('q') ?? '').trim();
     if (term.length < 2) return [];
@@ -2161,6 +2398,27 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', 'http://localhost');
   try {
+    if (url.pathname === '/api/likes') {
+      if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }).end(); return; }
+      try {
+        const body = await readJson(req);
+        const kind = body.kind === undefined ? 'track' : body.kind;
+        if (typeof body.id !== 'string' || typeof body.liked !== 'boolean') throw new Error('Provide an ID and liked boolean');
+        if (!isLikeKind(kind)) throw new Error(`kind must be one of ${LIKE_KINDS.join(', ')}`);
+        if (!likedEntityExists(kind, body.id)) { json(res, 404, { error: `${kind[0].toUpperCase()}${kind.slice(1)} not found` }); return; }
+        appLikes.set(body.id, body.liked, kind);
+        // A favourite is a request: the song, the album, or the whole
+        // discography goes to the archive the moment the heart fills.
+        const grabbed = body.liked ? grabLiked(kind, body.id) : null;
+        json(res, 200, { id: body.id, kind, liked: body.liked, grabbed });
+      } catch (error) { json(res, 422, { error: (error as Error).message }); }
+      return;
+    }
+    if (url.pathname === '/api/likes/sweep') {
+      if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }).end(); return; }
+      json(res, 200, sweepLikes());
+      return;
+    }
     if (url.pathname === '/api/local-playlists') {
       if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }).end(); return; }
       try {
@@ -2742,12 +3000,7 @@ const server = http.createServer(async (req, res) => {
      *
      * The single escalation point for a track the library does not properly
      * have: pressing play on an undownloaded song, or liking something radio
-     * turned up. Both mean the same thing, so both land here.
-     *
-     * Three states to reconcile, and it is idempotent across all of them:
-     *   - nothing queued  -> fetch it from YouTube, lossless hunt enabled
-     *   - parked by radio -> promote it; the file is already on disk
-     *   - on disk, lossy, no job -> queue the lossless hunt from the file
+     * turned up. Both mean the same thing, so both land here; see wantTrack.
      */
     if (url.pathname === '/api/tracks/want') {
       if (req.method !== 'POST') {
@@ -2763,53 +3016,11 @@ const server = http.createServer(async (req, res) => {
         const duration = Number(body.durationMs);
         const durationMs = Number.isFinite(duration) && duration > 0 ? Math.round(duration) : null;
 
-        const existing = upgrades.findQueued(artist, title);
-        if (existing) {
-          const { job, changed } = upgrades.promote(existing.id);
-          json(res, 200, {
-            outcome: changed ? 'promoted' : 'already-wanted',
-            job,
-            detail: changed
-              ? 'Queued for a lossless upgrade'
-              : `Already ${job.status.replace('_', ' ')}`,
-          });
-          return;
-        }
-
-        // On disk already but never queued - the lossless hunt can start from
-        // the file itself, no download needed.
-        const row = provenance.byMatchKey(provenanceKey(artist, title), album);
-        if (row) {
-          if (isLosslessCodec(row.codec)) {
-            json(res, 200, { outcome: 'already-lossless', detail: 'Already lossless in the library' });
-            return;
-          }
-          const job = upgrades.create({
-            artist, title, album: row.album ?? album,
-            durationMs: row.duration_ms ?? durationMs,
-            currentPath: row.path, currentCodec: row.codec,
-            autoUpgrade: true,
-          });
-          json(res, 200, { outcome: 'upgrading', job, detail: 'Hunting for a lossless copy' });
-          return;
-        }
-
-        const job = upgrades.create({
+        json(res, 200, wantTrack({
           artist, title, album, durationMs,
-          sourceUrl: `ytsearch5:${artist} ${title}`,
-          downloader: 'yt-dlp',
-          sourceMode: 'single',
-          // Deliberate: you asked for this one, so it gets the full path -
-          // YouTube now so it is playable, Soulseek after for the real copy.
-          autoUpgrade: true,
           recordingMbid: body.recordingMbid ? String(body.recordingMbid) : null,
           releaseMbid: body.releaseMbid ? String(body.releaseMbid) : null,
-        });
-        // The song is on its way; which record it is off is a separate,
-        // slower question. Answer it in the background so the click is not
-        // waiting on MusicBrainz.
-        fillAlbumBlanks();
-        json(res, 200, { outcome: 'fetching', job, detail: 'Getting it from YouTube now' });
+        }));
       } catch (err) {
         json(res, 400, { error: (err as Error).message });
       }
@@ -3170,6 +3381,21 @@ if (listenbrainz.enabled) {
   setTimeout(drain, 10_000).unref();
   setInterval(drain, 5 * 60_000).unref();
 }
+
+/**
+ * Favourites are standing orders. A short while after boot and every six
+ * hours, ask the archive for every song they cover, so an album the crawl
+ * found last night for a favourited artist is queued without anyone
+ * clicking anything.
+ */
+const sweep = () => {
+  try {
+    const counts = sweepLikes();
+    if (counts.queued) console.log(`likes: swept ${counts.likes} favourite(s), queued ${counts.queued} song(s)`);
+  } catch (err) { console.error('likes sweep:', (err as Error).message); }
+};
+setTimeout(sweep, 60_000).unref();
+setInterval(sweep, 6 * 60 * 60_000).unref();
 
 server.listen(PORT, () => console.log(`taste-db ui on :${PORT}, db: ${DB_FILE}`));
 

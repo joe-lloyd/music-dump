@@ -274,6 +274,13 @@ export class ProvenanceStore {
     this.now = now;
   }
 
+  searchTrackIds(term: string): string[] {
+    const q = '%' + term.replace(/[\\%_]/g, '\\$&') + '%';
+    return this.handle().prepare(`SELECT track_id FROM track_provenance
+      WHERE title LIKE ?1 ESCAPE '\\' OR artist LIKE ?1 ESCAPE '\\' OR album LIKE ?1 ESCAPE '\\'
+      ORDER BY artist, title LIMIT 100`).all(q).map(row => row.track_id).filter((id): id is string => typeof id === 'string');
+  }
+
   private handle(): DatabaseSync {
     if (!this.db) {
       mkdirSync(path.dirname(this.dbFile), { recursive: true });

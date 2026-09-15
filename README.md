@@ -398,6 +398,34 @@ valid chapters, or a split whose file count differs from the chapter count fails
 intake instead of silently importing a partial album. Album files live under
 `_YouTube/<Artist>/<Album>/<track> - <title>.mp3` with canonical tags.
 
+## Favourites are standing orders
+
+A heart on a song, an album or an artist does two things. It puts the thing
+in the matching list (Liked songs, the Saved albums grid, the starred artists),
+layered over Spotify's own likes, saves and follows in `data/likes.db`. And it
+asks the archive for every song it covers: the song itself, the album's
+listing, or the artist's whole discography as far as the crawl knows it. Each
+song goes through the same path as pressing play on something we lack
+(`/api/tracks/want`): fetched from YouTube now, hunted for a FLAC after.
+
+`POST /api/likes` takes `{ id, kind, liked }` with `kind` one of `track`,
+`album` or `artist` (default `track`), and answers with how many songs the
+click queued, skipped or already owned lossless. The web UI shows that count
+next to the heart.
+
+The order stands. A sweep runs a minute after boot and every six hours, and
+`POST /api/likes/sweep` runs it now. It walks every favourite made in the app
+and queues anything new, so an album the discography crawl found last night
+for a favourited artist is asked for without a click. Two things keep it from
+turning into a download campaign: a song whose hunt already gave up is left
+alone rather than re-fetched every six hours, and the sweep covers hearts
+pressed here only. Spotify's thousands of liked songs and followed artists
+seed the lists but are not fetched wholesale; followed artists reach the
+library manager through the import list below instead.
+
+`pnpm run verify:likes` proves the whole thing against the dev fixture, over
+HTTP and in Chromium at 1440 and 390 pixels.
+
 ## Local playback through Jellyfin
 
 The browser never receives the Jellyfin API key. `src/jellyfin.ts` indexes
