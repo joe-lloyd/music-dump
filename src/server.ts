@@ -223,6 +223,7 @@ const TASTE_ARTISTS_SQL = `SELECT COUNT(DISTINCT a.id) n FROM artists a
     SELECT 1 FROM track_artists ta JOIN liked_tracks lt
       ON lt.track_id = ta.track_id AND lt.removed_at IS NULL
     WHERE ta.artist_id = a.id)`;
+const RELEASE_LOOKBACK_DAYS = 30;
 
 function query(sql: string, ...args: (string | number)[]): unknown[] {
   const db = new DatabaseSync(DB_FILE, { readOnly: true });
@@ -1622,12 +1623,12 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
                   FROM album_artists aa JOIN artists a ON a.id = aa.artist_id
                  WHERE aa.album_id = al.id) AS artists
         FROM albums al
-        WHERE al.release_date >= date('now', '-90 days')
+        WHERE al.release_date >= date('now', ?)
           AND (EXISTS (SELECT 1 FROM artist_albums x JOIN artists a ON a.id = x.artist_id
                         WHERE x.album_id = al.id AND a.is_followed = 1)
             OR EXISTS (SELECT 1 FROM album_artists x JOIN artists a ON a.id = x.artist_id
                         WHERE x.album_id = al.id AND a.is_followed = 1))
-        ORDER BY al.release_date DESC LIMIT 36`),
+        ORDER BY al.release_date DESC LIMIT 36`, `-${RELEASE_LOOKBACK_DAYS} days`),
       history: (query('SELECT COUNT(*) n, SUM(ms_played) ms FROM history_plays')[0] as { n: number; ms: number }).n
         ? {
             ...query('SELECT COUNT(*) n, SUM(ms_played) ms, MIN(ts) first, MAX(ts) last FROM history_plays')[0] as object,
@@ -1851,8 +1852,10 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
       lidarrRows = query(`
         SELECT foreign_album_id, artist_name, title, album_type, release_date,
                cover_url, track_files, total_tracks, folder
-        FROM lidarr_release ORDER BY release_date DESC
-      `) as typeof lidarrRows;
+        FROM lidarr_release
+        WHERE release_date >= date('now', ?)
+        ORDER BY release_date DESC
+      `, `-${RELEASE_LOOKBACK_DAYS} days`) as typeof lidarrRows;
     } catch {
       lidarrRows = [];        // the sync has not run yet
     }
@@ -1890,13 +1893,13 @@ const api: Record<string, (params: URLSearchParams) => unknown | Promise<unknown
                 FROM album_artists aa JOIN artists a ON a.id = aa.artist_id
                WHERE aa.album_id = al.id) AS artists
       FROM albums al
-      WHERE al.release_date >= date('now', '-90 days')
+      WHERE al.release_date >= date('now', ?)
         AND (EXISTS (SELECT 1 FROM artist_albums x JOIN artists a ON a.id = x.artist_id
                       WHERE x.album_id = al.id AND a.is_followed = 1)
           OR EXISTS (SELECT 1 FROM album_artists x JOIN artists a ON a.id = x.artist_id
                       WHERE x.album_id = al.id AND a.is_followed = 1))
       ORDER BY al.release_date DESC LIMIT 36
-    `) as Record<string, string | number | null>[])
+    `, `-${RELEASE_LOOKBACK_DAYS} days`) as Record<string, string | number | null>[])
       .filter((row) => !known.has(albumMatchKey(String(row.artists ?? ''), String(row.name ?? ''))))
       .map((row) => ({
         id: String(row.id),
