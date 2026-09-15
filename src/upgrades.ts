@@ -824,6 +824,20 @@ export class UpgradeStore {
     return row ? asJob(row) : null;
   }
 
+  /**
+   * The newest job for this artist+title in any state, given-up ones
+   * included. findQueued deliberately forgets those so a person can ask
+   * again; the likes sweep must not, or it asks again every six hours.
+   */
+  latest(artist: string, title: string): UpgradeJob | null {
+    const row = this.db.prepare(`
+      SELECT * FROM upgrade_queue
+      WHERE artist = ? COLLATE NOCASE AND title = ? COLLATE NOCASE
+      ORDER BY id DESC LIMIT 1
+    `).get(artist, title);
+    return row ? asJob(row) : null;
+  }
+
   get(id: number): UpgradeJob | null {
     const row = this.db.prepare('SELECT * FROM upgrade_queue WHERE id = ?').get(id);
     return row ? asJob(row) : null;

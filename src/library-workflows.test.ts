@@ -16,6 +16,7 @@ test('HTTP: local playlist CRUD, album intake and repeated requests', { timeout:
   const db = new TasteDb(dbFile);
   db.run("INSERT INTO artists (id, name) VALUES ('artist', 'Porcupine Tree')");
   db.run("INSERT INTO albums (id, name) VALUES ('album', 'Test album')");
+  db.run("INSERT INTO album_artists VALUES ('album', 'artist', 0)");
   for (const [id, name, number] of [['one', 'Even Less', 1], ['two', 'Dark Matter', 2]]) {
     db.run('INSERT INTO tracks (id, name, album_id, track_number, disc_number, duration_ms) VALUES (?, ?, ?, ?, 1, 180000)', id, name, 'album', number);
     db.run('INSERT INTO track_artists VALUES (?, ?, 0)', id, 'artist');
@@ -39,7 +40,7 @@ test('HTTP: local playlist CRUD, album intake and repeated requests', { timeout:
   await new Promise<void>(resolve => socket.close(() => resolve()));
   const child = spawn(process.execPath, ['--experimental-strip-types', '--disable-warning=ExperimentalWarning', path.join(import.meta.dirname, 'server.ts')], {
     env: { ...process.env, PORT: String(port), SPOTIFY_DB: dbFile, PLAYLISTS_DB: path.join(dir, 'playlists.db'),
-      UPGRADES_DB: path.join(dir, 'upgrades.db'), APP_PLAYS_DB: path.join(dir, 'plays.db'), PROVENANCE_DB: path.join(dir, 'provenance.db'),
+      UPGRADES_DB: path.join(dir, 'upgrades.db'), LIKES_DB: path.join(dir, 'likes.db'), APP_PLAYS_DB: path.join(dir, 'plays.db'), PROVENANCE_DB: path.join(dir, 'provenance.db'),
       DISCOGS_DB: path.join(dir, 'discogs.db'), LYRICS_DB: path.join(dir, 'lyrics.db'), JELLYFIN_URL: `http://127.0.0.1:${jellyfinAddress.port}`, JELLYFIN_API_KEY: 'fixture', MUSIC_SOURCE_HOST: '', UPGRADE_WORKER_TOKEN: 'fixture-worker-token-123', LISTENBRAINZ_TOKEN: '' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -49,7 +50,7 @@ test('HTTP: local playlist CRUD, album intake and repeated requests', { timeout:
   const base = `http://127.0.0.1:${port}`;
   async function post(route: string, body: unknown) {
     const response = await fetch(base + route, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-    const data = await response.json();
+    const data = await response.json() as Record<string, unknown>;
     assert.ok(response.ok, JSON.stringify(data));
     assert.ok(data && typeof data === 'object');
     return data;
@@ -82,6 +83,23 @@ test('HTTP: local playlist CRUD, album intake and repeated requests', { timeout:
     assert.ok(Array.isArray(saved));
     assert.deepEqual(saved.map((t: { id: string }) => t.id), ['two', 'one', 'two']);
     await post('/api/local-playlists', { id: created.id, action: 'delete' });
+    // A like is a standing order. Liking the artist covers the album's
+    // listing: the FLAC we own is left alone, the song we lack is fetched
+    // once, and the next like or sweep finds nothing new to do.
+    const likedArtist = await post('/api/likes', { id: 'artist', kind: 'artist', liked: true });
+    assert.deepEqual(likedArtist.grabbed, { queued: 1, skipped: 0, lossless: 1 });
+    const artists = await (await fetch(base + '/api/artists')).json() as { id: string; liked: number }[];
+    assert.equal(artists.find((a: { id: string }) => a.id === 'artist')?.liked, 1);
+    const likedAlbum = await post('/api/likes', { id: 'album', kind: 'album', liked: true });
+    assert.deepEqual(likedAlbum.grabbed, { queued: 0, skipped: 1, lossless: 1 });
+    const albums = await (await fetch(base + '/api/albums')).json() as { id: string; liked: number }[];
+    assert.equal(albums.find((a: { id: string }) => a.id === 'album')?.liked, 1);
+    assert.deepEqual(await post('/api/likes/sweep', {}), { queued: 0, skipped: 2, lossless: 2, likes: 2 });
+    const unliked = await post('/api/likes', { id: 'album', kind: 'album', liked: false });
+    assert.equal(unliked.grabbed, null);
+    const after = await (await fetch(base + '/api/albums')).json() as { id: string }[];
+    assert.equal(after.some((a: { id: string }) => a.id === 'album'), false);
+    assert.equal((await fetch(base + '/api/likes', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: 'nope', kind: 'album', liked: true }) })).status, 404);
     const first = await post('/api/albums/import-tracks', { albumId: 'album' });
     const repeat = await post('/api/albums/import-tracks', { albumId: 'album' });
     assert.ok('jobs' in first && Array.isArray(first.jobs));
